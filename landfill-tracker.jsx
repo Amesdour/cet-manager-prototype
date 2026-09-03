@@ -1,0 +1,7812 @@
+import { useState, useEffect, createContext, useContext } from "react";
+import OfflineBanner from "./src/components/OfflineBanner";
+import ConflictReview from "./src/components/ConflictReview";
+import { queueDischarge, makeOfflineId } from "./src/lib/offlineDischargeQueue";
+import { saveReferenceData, loadReferenceData } from "./src/lib/offlineDataCache";
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   LANGUAGE CONTEXT
+═══════════════════════════════════════════════════════════════════════════ */
+const LangCtx = createContext("fr");
+function useT() {
+  const lang = useContext(LangCtx);
+  return (fr, ar) => lang === "ar" ? ar : fr;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CONSTANTS
+═══════════════════════════════════════════════════════════════════════════ */
+
+const COMPANY = {
+  name: "Établissement Public de Gestion des Centres d'Enfouissement Technique (Démo)",
+  short: "CETManager",
+  wilaya: "Wilaya Démo",
+  direction: "Direction de l'Environnement",
+  phone: "000 00 00 00",
+  email: "contact@demo-cet.dz",
+  address: "Cité Administrative, Wilaya Démo",
+  code: "18",
+};
+
+const COMPANY_FIELDS_DEFAULT = [
+  {id:"name",    label:"Raison sociale complète", value:COMPANY.name},
+  {id:"short",   label:"Abréviation",             value:COMPANY.short},
+  {id:"wilaya",  label:"Wilaya",                   value:COMPANY.wilaya},
+  {id:"address", label:"Adresse",                  value:COMPANY.address},
+  {id:"phone",   label:"Téléphone",                value:COMPANY.phone},
+  {id:"email",   label:"Email",                    value:COMPANY.email},
+  {id:"code",    label:"Code Wilaya",              value:COMPANY.code},
+];
+const cof = (co, id) => (Array.isArray(co) ? co : COMPANY_FIELDS_DEFAULT).find(f=>f.id===id)?.value || '';
+
+const SITES_DB_INIT = [
+  { id:"CET-JIJ", name:"Centre d'Enfouissement Technique Démo",     region:"Ville Démo", type:"CET", capacity:600000, used:287400, commune:"Démo",      localisation:"36.8167° N, 5.7667° E", acceptedWaste:["MEN","IND","MED","INE"] },
+  { id:"CET-TAH", name:"Centre d'Enfouissement Technique Site B",     region:"Site B",              type:"CET", capacity:400000, used:156700, commune:"Site B",      localisation:"36.7333° N, 5.9000° E", acceptedWaste:["MEN","IND","INE"] },
+  { id:"CET-ELM", name:"Centre d'Enfouissement Technique Site C",  region:"Site C",           type:"CET", capacity:300000, used:198300, commune:"Site C",   localisation:"36.7500° N, 6.5667° E", acceptedWaste:["MEN","IND"] },
+  { id:"CDI-TAS", name:"CDI Site D", region:"Site D",          type:"CDI", capacity:500000, used:89000,  commune:"Site D",  localisation:"36.6833° N, 6.1333° E", acceptedWaste:["INE"] },
+];
+
+const WASTE_TYPES_INIT = [
+  { id:"MEN", label:"Ménager (DMA)",    price:850,  siteTypes:["CET"] },
+  { id:"IND", label:"Industriel (DIB)", price:1200, siteTypes:["CET"] },
+  { id:"MED", label:"Médical (DASRI)",  price:2500, siteTypes:["CET"] },
+  { id:"INE", label:"Inerte / BTP",     price:600,  siteTypes:["CDI","CET"] },
+];
+
+const TRUCKS_DB = [
+  { plate:"18-TRK-001", clientId:"C001", tare:8.0,  allowed:["MEN","INE"] },
+  { plate:"18-TRK-002", clientId:"C001", tare:9.5,  allowed:["MEN","INE"] },
+  { plate:"18-COM-015", clientId:"C002", tare:7.5,  allowed:["MEN"]       },
+  { plate:"18-MED-005", clientId:"C003", tare:4.5,  allowed:["MED"]       },
+  { plate:"18-BTP-020", clientId:"C004", tare:12.0, allowed:["INE"]       },
+];
+
+const CLIENTS_INIT = [
+  { id:"C001", name:"Commune de Démo",       clientType:"state",   type:"convention", status:"approved",     creditEnabled:false, weightLimitYear:5000, creditLimit:0,      consumed:0, payFrequency:"monthly",  payInstrument:"cheque", phone:"000 00 00 00", address:"Démo Centre",          nif:"000000000000000", rc:"",                 docs:["Arrêté communal","Convention signée"], note:"", vatSubject:false },
+  { id:"C002", name:"Commune Démo B",        clientType:"state",   type:"convention", status:"approved",     creditEnabled:false, weightLimitYear:3000, creditLimit:0,      consumed:0, payFrequency:"annual",   payInstrument:"bank",   phone:"000 00 00 00", address:"Site B",                  nif:"000000000000000", rc:"",                 docs:["Arrêté communal","Convention signée"], note:"", vatSubject:false },
+  { id:"C003", name:"Clinique Médicale Démo",  clientType:"private", type:"convention", status:"approved",     creditEnabled:true,  weightLimitYear:0,    creditLimit:400000, consumed:0, payFrequency:"monthly",  payInstrument:"bank",   phone:"000 00 00 00", address:"Cité Cnep, Démo",       nif:"000000000000000", rc:"18/00-1234567B18", docs:["RC","NIF","Assurance RC","Bail commercial"], note:"", vatSubject:true },
+  { id:"C004", name:"EURL BTP Démo",  clientType:"private", type:"convention", status:"under_review", creditEnabled:false, weightLimitYear:0,    creditLimit:0,      consumed:0, payFrequency:"monthly",  payInstrument:"cheque", phone:"000 00 00 00", address:"Zone Activité, Démo",   nif:"000000000000000", rc:"18/00-7654321B18", docs:["RC","NIF"], note:"Documents reçus, vérification en cours.", vatSubject:true },
+  { id:"C005", name:"SPA Démo Algérie",    clientType:"private", type:"convention", status:"pending_docs", creditEnabled:false, weightLimitYear:0,    creditLimit:0,      consumed:0, payFrequency:"monthly",  payInstrument:"cheque", phone:"000 00 00 00", address:"Site C",                nif:"",               rc:"",                 docs:[], note:"En attente de dépôt des documents requis.", vatSubject:true },
+  { id:"C008", name:"Client Prépayé Démo",        clientType:"private", type:"prepaid",    status:"approved",     creditEnabled:false, weightLimitYear:0,    creditLimit:200000, consumed:0, payFrequency:"",         payInstrument:"",       phone:"000 00 00 00", address:"Démo",                 nif:"",               rc:"",                 docs:[], note:"Bonus prépayé 200 000 DA", vatSubject:false },
+  { id:"C006", name:"Client Comptant Démo",       clientType:"cash",    type:"daily",      status:"approved",     creditEnabled:false, weightLimitYear:0,    creditLimit:0,      consumed:0, payFrequency:"",         payInstrument:"",       phone:"000 00 00 00", address:"Démo",                 nif:"",               rc:"",                 docs:[], note:"", vatSubject:false },
+  { id:"C007", name:"Entreprise Démo SARL",  clientType:"cash",    type:"daily",      status:"approved",     creditEnabled:false, weightLimitYear:0,    creditLimit:0,      consumed:0, payFrequency:"",         payInstrument:"",       phone:"000 00 00 00", address:"Site B",                 nif:"",               rc:"",                 docs:[], note:"", vatSubject:true },
+];
+
+const USERS_INIT = [
+  { id:"U001", name:"Directeur Administrateur", email:"admin@demo-cet.dz",     password:"admin123", role:"admin",    status:"active",  phone:"000 00 00 00", matricule:"ADM-001",     siteId:"all",     createdAt:"2024-01-15" },
+  { id:"U002", name:"Opérateur Démo 1",             email:"operateur1@demo-cet.dz", password:"op1234",   role:"operator", status:"active",  phone:"000 00 00 00", matricule:"OP-2024-001", siteId:"CET-JIJ", createdAt:"2024-03-10" },
+  { id:"U003", name:"Opérateur Démo 2",              email:"operateur2@demo-cet.dz", password:"op1234",   role:"operator", status:"active",  phone:"000 00 00 00", matricule:"OP-2024-002", siteId:"CET-TAH", createdAt:"2024-03-10" },
+  { id:"U004", name:"Opérateur Démo 3",             email:"operateur3@demo-cet.dz",  password:"op1234",   role:"operator", status:"pending", phone:"000 00 00 00", matricule:"OP-2024-003", siteId:"CET-ELM", createdAt:"2024-04-20" },
+];
+
+const DISCHARGES_INIT = [];
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   STYLES
+═══════════════════════════════════════════════════════════════════════════ */
+const STYLES = `
+@import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Condensed:wght@600;700;800&family=Share+Tech+Mono&family=Cairo:wght@400;600;700;800&display=swap');
+
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#f1f7f2;--s1:#ffffff;--s2:#edf4ee;--s3:#e2ede4;
+  --bdr:#c8d9cb;--bdr2:#b4c8b8;
+  --g:#178a34;--g2:#0e6e27;--g3:#08521c;
+  --warn:#9a6200;--err:#b02000;--info:#006090;--purple:#5030b0;--orange:#b05000;
+  --txt:#14201a;--muted:#4a6e52;--dim:#bcd2bf;
+  --font:'Barlow',sans-serif;--head:'Barlow Condensed',sans-serif;--mono:'Share Tech Mono',monospace;
+  --r:10px;--sh:0 4px 24px rgba(0,0,0,.10);--sh-sm:0 2px 8px rgba(0,0,0,.07);
+  --glow:0 0 20px rgba(23,138,52,.07);
+  --topbar-bg:rgba(255,255,255,.94);--modal-bg-end:#edf4ee;
+  --ovl-sm:rgba(0,0,0,.035);--ovl-md:rgba(0,0,0,.055);
+  --sidebar-end:#e4ede6;--login-box-end:#edf4ee;
+  --indigo:#4f46e5;
+}
+[data-theme="dark"]{
+  --bg:#050e07;--s1:#08120a;--s2:#0c180e;--s3:#101c12;
+  --bdr:#1c2e20;--bdr2:#26402b;
+  --g:#2ecc58;--g2:#60ea88;--g3:#a8f7c4;
+  --warn:#f5c842;--err:#ff6b4a;--info:#4dc8f0;--purple:#b59dff;--orange:#ff9f4a;
+  --txt:#eaf5ec;--muted:#7aaa84;--dim:#3d6045;
+  --sh:0 4px 28px rgba(0,0,0,.55);--sh-sm:0 2px 10px rgba(0,0,0,.35);
+  --glow:0 0 24px rgba(46,204,88,.12);
+  --topbar-bg:rgba(5,14,7,.93);--modal-bg-end:#060e08;
+  --ovl-sm:rgba(0,0,0,.18);--ovl-md:rgba(0,0,0,.28);
+  --sidebar-end:#060d08;--login-box-end:#060e08;
+  --indigo:#818cf8;
+}
+
+/* ── Dark mode fancy enhancements ─────────────────────────────────────── */
+[data-theme="dark"] .tb-title{
+  background:linear-gradient(135deg,#eaf5ec 30%,#60ea88);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
+  text-shadow:none;filter:drop-shadow(0 0 18px rgba(46,204,88,.25));
+}
+[data-theme="dark"] .mh-title,
+[data-theme="dark"] .pt,
+[data-theme="dark"] .settings-title{
+  color:#eaf5ec;text-shadow:0 0 28px rgba(46,204,88,.22);
+}
+[data-theme="dark"] .kpi-v{
+  color:#eaf5ec;text-shadow:0 0 22px rgba(46,204,88,.18);
+}
+[data-theme="dark"] .wv,
+[data-theme="dark"] .ctv{
+  text-shadow:0 0 28px rgba(46,204,88,.4);
+}
+[data-theme="dark"] .login-title{
+  background:linear-gradient(135deg,#eaf5ec 20%,#a8f7c4 100%);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
+  text-shadow:none;filter:drop-shadow(0 0 14px rgba(46,204,88,.3));
+}
+[data-theme="dark"] .login-company{
+  text-shadow:0 0 20px rgba(46,204,88,.35);letter-spacing:.1em;
+}
+[data-theme="dark"] .sbl-title{
+  text-shadow:0 0 18px rgba(46,204,88,.35);
+}
+[data-theme="dark"] .role-name{
+  color:#60ea88;text-shadow:0 0 12px rgba(46,204,88,.3);
+}
+[data-theme="dark"] th{
+  background:rgba(46,204,88,.06);color:var(--g2);letter-spacing:.15em;
+}
+[data-theme="dark"] td{
+  border-bottom-color:rgba(28,46,32,.9);
+}
+[data-theme="dark"] .sth{
+  background:linear-gradient(135deg,rgba(46,204,88,.14),rgba(46,204,88,.06));
+  color:var(--g3);text-shadow:0 0 12px rgba(46,204,88,.25);
+}
+[data-theme="dark"] .nav-lbl{
+  color:var(--g);opacity:.5;letter-spacing:.22em;
+}
+[data-theme="dark"] .nb.act{
+  box-shadow:inset 0 0 0 1px rgba(46,204,88,.25),0 0 12px rgba(46,204,88,.06);
+}
+[data-theme="dark"] .field label{
+  color:#60ea88;opacity:.7;
+}
+[data-theme="dark"] .fi{
+  background:#0c180e;border-color:#26402b;color:#eaf5ec;
+}
+[data-theme="dark"] .fi:focus{
+  border-color:rgba(46,204,88,.6);box-shadow:0 0 0 3px rgba(46,204,88,.1);
+}
+[data-theme="dark"] .login-box{
+  box-shadow:var(--sh),0 0 0 1px rgba(46,204,88,.08),0 0 60px rgba(46,204,88,.04);
+}
+[data-theme="dark"] .modal{
+  box-shadow:0 24px 80px rgba(0,0,0,.6),0 0 0 1px rgba(46,204,88,.07);
+}
+[data-theme="dark"] .op-card{
+  box-shadow:0 2px 12px rgba(0,0,0,.35);
+}
+[data-theme="dark"] .kpi{
+  box-shadow:var(--sh-sm),0 0 0 1px rgba(46,204,88,.04);
+}
+[data-theme="dark"] .logout-btn:hover{
+  box-shadow:0 0 12px rgba(255,107,74,.1);
+}
+[data-theme="dark"] ::-webkit-scrollbar-thumb{
+  background:rgba(46,204,88,.25);
+}
+[data-theme="dark"] ::-webkit-scrollbar-thumb:hover{
+  background:rgba(46,204,88,.4);
+}
+[data-theme="dark"] .panel{
+  box-shadow:0 6px 32px rgba(0,0,0,.5),0 0 0 1px rgba(46,204,88,.05);
+}
+[data-theme="dark"] .card{
+  box-shadow:0 2px 14px rgba(0,0,0,.4),0 0 0 1px rgba(46,204,88,.04);
+}
+[data-theme="dark"] .ph{
+  background:linear-gradient(135deg,rgba(46,204,88,.08) 0%,rgba(46,204,88,.03) 100%);
+  border-bottom-color:rgba(46,204,88,.1);
+}
+[data-theme="dark"] .btn.bi{
+  background:rgba(77,200,240,.08);border-color:rgba(77,200,240,.25);color:var(--info);
+}
+[data-theme="dark"] .btn.bi:hover{
+  background:rgba(77,200,240,.15);
+}
+[data-theme="dark"] .topbar{
+  box-shadow:0 1px 0 rgba(46,204,88,.08),0 4px 20px rgba(0,0,0,.3);
+}
+[data-theme="dark"] .kpi{
+  background:linear-gradient(135deg,var(--s2) 0%,var(--s3) 100%);
+  box-shadow:0 2px 16px rgba(0,0,0,.4),0 0 0 1px rgba(46,204,88,.06);
+}
+[data-theme="dark"] .seg-bar{
+  background:var(--s2);border-color:var(--bdr);
+}
+[data-theme="dark"] .seg-btn.active{
+  box-shadow:0 2px 8px rgba(0,0,0,.3);
+}
+[data-theme="dark"] .nb:hover{
+  background:rgba(46,204,88,.08);
+}
+[data-theme="dark"] .nb.act{
+  background:linear-gradient(135deg,rgba(46,204,88,.15) 0%,rgba(46,204,88,.07) 100%);
+  box-shadow:inset 0 0 0 1px rgba(46,204,88,.2),0 0 12px rgba(46,204,88,.06);
+}
+[data-theme="dark"] table{
+  border-color:var(--bdr);
+}
+[data-theme="dark"] tr:hover td{
+  background:rgba(46,204,88,.025);
+}
+[data-theme="dark"] .badge{
+  box-shadow:none;
+}
+[data-theme="dark"] .mh{
+  background:linear-gradient(135deg,var(--s1) 0%,var(--s2) 100%);
+  border-bottom-color:rgba(46,204,88,.1);
+}
+body{background:var(--bg);color:var(--txt);font-family:var(--font);font-size:14px;line-height:1.5}
+button{cursor:pointer;font-family:var(--font);color:var(--txt)}
+input,select,textarea{font-family:var(--font)}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:var(--s1)}
+::-webkit-scrollbar-thumb{background:rgba(41,196,84,.2);border-radius:2px}
+::-webkit-scrollbar-thumb:hover{background:rgba(41,196,84,.35)}
+
+/* Shell */
+.shell{display:flex;height:100vh;overflow:hidden}
+.sidebar{width:242px;min-width:242px;background:linear-gradient(180deg,var(--s1) 0%,var(--sidebar-end) 100%);border-right:1px solid var(--bdr);display:flex;flex-direction:column;transition:box-shadow .2s}
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden;background:var(--bg)}
+.content{flex:1;overflow-y:auto;padding:26px 30px}
+
+/* Sidebar brand */
+.sbl{padding:20px 16px 16px;border-bottom:1px solid var(--bdr);background:linear-gradient(135deg,rgba(41,196,84,.07),transparent)}
+.sbl-title{font-family:var(--head);font-size:12px;font-weight:800;color:var(--g);letter-spacing:.07em;text-transform:uppercase;line-height:1.3}
+.sbl-sub{font-family:var(--mono);font-size:8px;color:var(--muted);margin-top:4px;line-height:1.7}
+nav{flex:1;padding:10px 8px;overflow-y:auto}
+.nav-grp{margin-bottom:18px}
+.nav-lbl{font-family:var(--mono);font-size:8px;color:var(--dim);text-transform:uppercase;letter-spacing:.2em;padding:0 10px 7px}
+.nb{display:flex;align-items:center;gap:9px;width:100%;padding:8px 12px;border-radius:9px;border:none;background:none;color:var(--muted);font-size:12px;font-weight:600;text-align:left;transition:all .17s cubic-bezier(.4,0,.2,1)}
+.nb:hover{background:rgba(41,196,84,.07);color:var(--txt);transform:translateX(1px)}
+.nb.act{background:linear-gradient(135deg,rgba(41,196,84,.2),rgba(41,196,84,.09));color:var(--g);box-shadow:inset 0 0 0 1px rgba(41,196,84,.22),0 2px 8px rgba(41,196,84,.08)}
+.nb .ic{font-size:14px;width:20px;text-align:center;flex-shrink:0}
+.nb .bdg{margin-left:auto;background:var(--err);color:#fff;font-family:var(--mono);font-size:8px;padding:2px 6px;border-radius:10px;min-width:18px;text-align:center}
+.nb.act .bdg{background:rgba(0,0,0,.25);color:#031008}
+.sbf{padding:10px 12px;border-top:1px solid var(--bdr)}
+.role-card{background:linear-gradient(135deg,var(--s2),var(--s3));border:1px solid var(--bdr);border-radius:10px;padding:11px 12px}
+.role-lbl{font-family:var(--mono);font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.12em}
+.role-name{font-size:12px;font-weight:700;color:var(--g2);margin-top:3px}
+.role-detail{font-family:var(--mono);font-size:9px;color:var(--muted);margin-top:1px}
+.logout-btn{margin-top:8px;width:100%;padding:7px 8px;border-radius:8px;border:1px solid var(--bdr);background:none;color:var(--muted);font-size:11px;font-weight:600;text-align:center;cursor:pointer;transition:all .15s;letter-spacing:.02em}
+.logout-btn:hover{color:var(--err);border-color:rgba(240,85,61,.4);background:rgba(240,85,61,.05)}
+
+/* Topbar */
+.topbar{background:var(--topbar-bg);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border-bottom:1px solid var(--bdr);padding:13px 28px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;z-index:20;box-shadow:0 1px 0 rgba(0,0,0,.04),0 2px 8px rgba(0,0,0,.04)}
+.tb-title{font-family:var(--head);font-size:22px;font-weight:800;letter-spacing:.04em;color:var(--txt)}
+.tb-right{display:flex;align-items:center;gap:8px}
+.chip{font-family:var(--mono);font-size:10px;padding:4px 11px;border-radius:6px;border:1px solid;transition:all .15s}
+.chip-ok{color:var(--g);border-color:rgba(41,196,84,.3);background:rgba(41,196,84,.07)}
+.chip-warn{color:var(--warn);border-color:rgba(240,184,61,.3);background:rgba(240,184,61,.07)}
+.chip-err{color:var(--err);border-color:rgba(240,85,61,.3);background:rgba(240,85,61,.07)}
+.chip-dim{color:var(--muted);border-color:var(--bdr);background:var(--s2)}
+.chip-info{color:var(--info);border-color:rgba(61,186,240,.3);background:rgba(61,186,240,.07)}
+
+/* Cards */
+.card{background:var(--s2);border:1px solid var(--bdr);border-radius:var(--r);padding:18px 20px;transition:border-color .2s,box-shadow .2s,transform .2s}
+.card:hover{border-color:var(--bdr2);box-shadow:var(--sh-sm)}
+.card-sm{background:var(--s2);border:1px solid var(--bdr);border-radius:var(--r);padding:13px 15px}
+.panel{background:var(--s1);border:1px solid var(--bdr);border-radius:14px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.07),0 1px 4px rgba(0,0,0,.04)}
+.ph{padding:14px 20px;border-bottom:1px solid var(--bdr);display:flex;align-items:center;justify-content:space-between;gap:10px;background:linear-gradient(135deg,var(--ovl-sm),transparent)}
+.pt{font-family:var(--head);font-size:16px;font-weight:800;letter-spacing:.04em}
+
+/* KPI */
+.kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
+.kpi{background:linear-gradient(135deg,var(--s2),var(--s3));border:1px solid var(--bdr);border-radius:14px;padding:18px 19px;position:relative;overflow:hidden;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 2px 10px rgba(0,0,0,.06)}
+.kpi:hover{border-color:var(--bdr2);transform:translateY(-2px);box-shadow:var(--sh)}
+.kpi::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--kc,var(--g)),transparent)}
+.kpi::after{content:'';position:absolute;top:3px;left:0;right:0;bottom:0;background:linear-gradient(180deg,rgba(255,255,255,.025),transparent);pointer-events:none}
+.kpi-l{font-family:var(--mono);font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.15em}
+.kpi-v{font-family:var(--head);font-size:28px;font-weight:800;line-height:1;margin:7px 0 4px;color:var(--txt)}
+.kpi-s{font-size:11px;color:var(--muted)}
+.kpi-i{position:absolute;right:15px;top:14px;font-size:26px;opacity:.1}
+
+/* Table */
+.tw{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th{font-family:var(--mono);font-size:8px;text-transform:uppercase;letter-spacing:.13em;color:var(--muted);padding:11px 14px;text-align:left;border-bottom:1px solid var(--bdr);white-space:nowrap;background:rgba(0,0,0,.18)}
+td{padding:11px 14px;border-bottom:1px solid rgba(22,35,25,.8);font-size:13px;white-space:nowrap;transition:background .12s}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(41,196,84,.035)}
+tr.flagged-row td{background:rgba(240,85,61,.04)}
+tr.flagged-row:hover td{background:rgba(240,85,61,.08)}
+.mn{font-family:var(--mono);font-size:11px}
+
+/* Badges */
+.badge{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:20px;font-size:10px;font-weight:600;font-family:var(--mono);white-space:nowrap;letter-spacing:.03em}
+.b-ok{background:rgba(41,196,84,.12);color:var(--g);border:1px solid rgba(41,196,84,.28)}
+.b-warn{background:rgba(240,184,61,.12);color:var(--warn);border:1px solid rgba(240,184,61,.28)}
+.b-err{background:rgba(240,85,61,.12);color:var(--err);border:1px solid rgba(240,85,61,.28)}
+.b-info{background:rgba(61,186,240,.12);color:var(--info);border:1px solid rgba(61,186,240,.28)}
+.b-purple{background:rgba(167,139,250,.13);color:var(--purple);border:1px solid rgba(167,139,250,.28)}
+.b-cash{background:rgba(109,232,150,.12);color:var(--g2);border:1px solid rgba(109,232,150,.28)}
+.b-muted{background:rgba(77,110,86,.1);color:var(--muted);border:1px solid var(--bdr)}
+.b-dim{background:var(--s3);color:var(--muted);border:1px solid var(--bdr)}
+.b-indigo{background:rgba(99,102,241,.12);color:var(--indigo);border:1px solid rgba(99,102,241,.28)}
+
+/* Forms */
+.fg{display:grid;gap:13px}
+.fg2{grid-template-columns:1fr 1fr}
+.fg3{grid-template-columns:1fr 1fr 1fr}
+.field{display:flex;flex-direction:column;gap:5px}
+.field label{font-family:var(--mono);font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.13em}
+.fi{background:var(--s3);border:1px solid var(--bdr2);border-radius:8px;color:var(--txt);padding:9px 12px;font-size:13px;outline:none;transition:border-color .15s,box-shadow .15s;width:100%}
+.fi:focus{border-color:rgba(41,196,84,.55);box-shadow:0 0 0 3px rgba(41,196,84,.09)}
+.fi[readonly]{color:var(--muted)}
+.fi option{background:var(--s3)}
+textarea.fi{resize:vertical;min-height:80px}
+
+/* Weight box */
+.wb{background:linear-gradient(135deg,var(--s3),var(--s2));border:1px solid var(--bdr2);border-radius:10px;padding:12px 18px;display:flex;align-items:center;justify-content:space-between}
+.wv{font-family:var(--head);font-size:36px;font-weight:800;color:var(--g);text-shadow:0 0 22px rgba(41,196,84,.28)}
+.wu{font-family:var(--mono);font-size:11px;color:var(--muted)}
+
+/* Cost preview */
+.cost-box{background:linear-gradient(135deg,rgba(41,196,84,.08),rgba(41,196,84,.03));border:1px solid rgba(41,196,84,.22);border-radius:var(--r);padding:14px 16px}
+.cl{display:flex;justify-content:space-between;align-items:center;padding:4px 0}
+.cl.ct{border-top:1px solid rgba(41,196,84,.15);margin-top:8px;padding-top:10px}
+.clb{font-size:12px;color:var(--muted)}
+.clv{font-family:var(--mono);font-size:12px}
+.ctv{font-family:var(--head);font-size:28px;font-weight:800;color:var(--g);text-shadow:0 0 18px rgba(41,196,84,.25)}
+
+/* Buttons */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:9px 18px;border-radius:9px;border:none;font-size:13px;font-weight:700;font-family:var(--font);transition:all .16s cubic-bezier(.4,0,.2,1);white-space:nowrap;letter-spacing:.01em}
+.bp{background:linear-gradient(135deg,var(--g),#1fa845);color:#031008;box-shadow:0 2px 12px rgba(41,196,84,.25)}
+.bp:hover{background:linear-gradient(135deg,var(--g2),var(--g));box-shadow:0 4px 22px rgba(41,196,84,.38);transform:translateY(-1px)}
+.bg{background:none;color:var(--muted);border:1px solid var(--bdr2)}
+.bg:hover{color:var(--txt);border-color:rgba(41,196,84,.28);background:rgba(41,196,84,.05)}
+.be{background:rgba(240,85,61,.1);color:var(--err);border:1px solid rgba(240,85,61,.28)}
+.be:hover{background:rgba(240,85,61,.18);border-color:rgba(240,85,61,.5);transform:translateY(-1px)}
+.bw{background:rgba(240,184,61,.1);color:var(--warn);border:1px solid rgba(240,184,61,.28)}
+.bw:hover{background:rgba(240,184,61,.18);transform:translateY(-1px)}
+.bi{background:rgba(61,186,240,.1);color:var(--info);border:1px solid rgba(61,186,240,.28)}
+.bi:hover{background:rgba(61,186,240,.18);transform:translateY(-1px)}
+.bsm{padding:5px 12px;font-size:11px;border-radius:7px}
+.bfw{width:100%}
+.btn:disabled{opacity:.28;cursor:default;transform:none!important;box-shadow:none!important}
+.btn:active:not(:disabled){transform:translateY(0)!important;box-shadow:none!important}
+
+/* Modal */
+.ov{position:fixed;inset:0;background:rgba(0,0,0,.78);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:100;display:flex;align-items:center;justify-content:center;padding:20px}
+.modal{background:linear-gradient(180deg,var(--s1),var(--modal-bg-end));border:1px solid var(--bdr);border-radius:18px;width:500px;max-width:95vw;max-height:90vh;overflow-y:auto;box-shadow:0 32px 100px rgba(0,0,0,.28),0 0 0 1px rgba(255,255,255,.03)}
+.modal-lg{width:700px}
+.mh{padding:20px 24px;border-bottom:1px solid var(--bdr);display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,var(--ovl-sm),transparent)}
+.mh-title{font-family:var(--head);font-size:20px;font-weight:800;letter-spacing:.03em}
+.mb2{padding:24px}
+.mf{padding:14px 24px;border-top:1px solid var(--bdr);display:flex;gap:10px;justify-content:flex-end;background:linear-gradient(135deg,var(--ovl-sm),transparent)}
+
+/* Receipt */
+.rcpt{background:var(--s2);border:1px solid var(--bdr);border-radius:var(--r);padding:18px;font-family:var(--mono);font-size:11px;box-shadow:var(--sh-sm)}
+.rh{text-align:center;border-bottom:1px dashed var(--bdr2);padding-bottom:12px;margin-bottom:12px}
+.rr{display:flex;justify-content:space-between;padding:3px 0}
+.rrttl{border-top:1px dashed var(--bdr2);margin-top:10px;padding-top:10px;font-size:15px;font-weight:700;color:var(--g);display:flex;justify-content:space-between}
+
+/* Credit bar */
+.cbt{background:var(--s3);border-radius:4px;height:5px;overflow:hidden}
+.cbf{height:100%;border-radius:4px;transition:width .6s cubic-bezier(.4,0,.2,1)}
+
+/* Alert */
+.alrt{display:flex;align-items:flex-start;gap:10px;padding:12px 14px;border-radius:9px;font-size:12px;margin-bottom:14px;line-height:1.5}
+.aw{background:rgba(240,184,61,.08);border:1px solid rgba(240,184,61,.2);color:var(--warn)}
+.ae{background:rgba(240,85,61,.08);border:1px solid rgba(240,85,61,.2);color:var(--err)}
+.ao{background:rgba(41,196,84,.08);border:1px solid rgba(41,196,84,.2);color:var(--g)}
+.ai{background:rgba(61,186,240,.08);border:1px solid rgba(61,186,240,.2);color:var(--info)}
+
+/* Schema */
+.sg{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+.st{background:var(--s2);border:1px solid var(--bdr);border-radius:var(--r);overflow:hidden}
+.sth{padding:9px 14px;font-family:var(--head);font-size:14px;font-weight:800;letter-spacing:.04em;display:flex;align-items:center;gap:7px;color:#031008}
+.sr{display:flex;align-items:center;justify-content:space-between;padding:6px 14px;border-bottom:1px solid var(--bdr)}
+.sr:last-child{border-bottom:none}
+.sf{font-family:var(--mono);font-size:11px}
+.styp{font-size:10px;color:var(--muted)}
+
+/* Login */
+.login-shell{min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(ellipse at 50% 0%,rgba(41,196,84,.08) 0%,var(--bg) 60%);padding:20px}
+.login-box{background:linear-gradient(180deg,var(--s1),var(--login-box-end));border:1px solid var(--bdr);border-radius:20px;padding:38px 42px;width:430px;max-width:100%;box-shadow:var(--sh),0 0 0 1px rgba(23,138,52,.06)}
+.login-logo{text-align:center;margin-bottom:30px}
+.login-logo-icon{width:90px;height:90px;object-fit:contain;margin:0 auto 10px;display:block;filter:drop-shadow(0 0 14px rgba(41,196,84,.25))}
+.login-company{font-family:var(--head);font-size:11px;font-weight:800;color:var(--g);letter-spacing:.08em;text-transform:uppercase;line-height:1.5;margin-bottom:4px}
+.login-wilaya{font-family:var(--mono);font-size:9px;color:var(--muted)}
+.login-title{font-family:var(--head);font-size:24px;font-weight:800;margin-bottom:22px;text-align:center;letter-spacing:.02em}
+.login-switch{text-align:center;margin-top:18px;font-size:12px;color:var(--muted)}
+.login-switch a{color:var(--g);cursor:pointer;font-weight:600}
+.login-switch a:hover{text-decoration:underline}
+
+/* Tabs */
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--bdr);margin-bottom:22px}
+.tab{padding:9px 20px;border:none;background:none;color:var(--muted);font-size:13px;font-weight:600;font-family:var(--font);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;transition:all .16s;letter-spacing:.01em}
+.tab.active{color:var(--g);border-bottom-color:var(--g)}
+.tab:hover:not(.active){color:var(--txt);background:rgba(41,196,84,.03)}
+
+/* Segment */
+.seg{display:flex;background:var(--s3);border:1px solid var(--bdr2);border-radius:10px;padding:3px;gap:2px}
+.seg-btn{flex:1;padding:8px 14px;border-radius:8px;border:none;background:none;color:var(--muted);font-size:12px;font-weight:700;cursor:pointer;transition:all .17s cubic-bezier(.4,0,.2,1);text-align:center;letter-spacing:.01em}
+.seg-btn:hover:not(.active){background:rgba(41,196,84,.06);color:var(--txt)}
+.seg-btn.active{background:linear-gradient(135deg,var(--g),#1fa845);color:#031008;box-shadow:0 2px 10px rgba(41,196,84,.28)}
+
+/* Operator card */
+.op-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:16px}
+.op-card{background:linear-gradient(135deg,var(--s2),var(--s3));border:1px solid var(--bdr);border-radius:14px;padding:18px;transition:all .2s cubic-bezier(.4,0,.2,1)}
+.op-card:hover{border-color:var(--bdr2);box-shadow:var(--sh-sm);transform:translateY(-1px)}
+.op-avatar{width:48px;height:48px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
+.op-av-admin{background:rgba(41,196,84,.12);border:2px solid rgba(41,196,84,.28)}
+.op-av-op{background:rgba(61,186,240,.12);border:2px solid rgba(61,186,240,.22)}
+
+/* Settings */
+.settings-grid{display:grid;grid-template-columns:220px 1fr;gap:20px}
+.settings-nav{background:var(--s1);border:1px solid var(--bdr);border-radius:13px;padding:8px;height:fit-content;box-shadow:var(--sh-sm)}
+.sn-item{padding:9px 13px;border-radius:9px;cursor:pointer;font-size:13px;font-weight:600;color:var(--muted);transition:all .16s;display:flex;align-items:center;gap:9px;border:none;background:none;width:100%;text-align:left}
+.sn-item:hover{background:rgba(41,196,84,.06);color:var(--txt)}
+.sn-item.active{background:linear-gradient(135deg,rgba(41,196,84,.14),rgba(41,196,84,.07));color:var(--g);box-shadow:inset 0 0 0 1px rgba(41,196,84,.18)}
+.sn-ic{font-size:15px;width:18px;text-align:center}
+.settings-body{background:var(--s1);border:1px solid var(--bdr);border-radius:13px;padding:28px;box-shadow:var(--sh-sm)}
+.settings-title{font-family:var(--head);font-size:20px;font-weight:800;margin-bottom:4px;letter-spacing:.04em}
+.settings-sub{font-size:12px;color:var(--muted);margin-bottom:24px}
+.divider{border:none;border-top:1px solid var(--bdr);margin:22px 0}
+
+/* Doc list */
+.doc-item{display:flex;align-items:center;gap:8px;padding:9px 12px;background:var(--s3);border:1px solid var(--bdr);border-radius:8px;font-size:12px;margin-bottom:6px;transition:border-color .15s}
+.doc-item:hover{border-color:var(--bdr2)}
+
+/* Gate */
+.gate-mode{margin-bottom:20px}
+
+/* Flagged row pulse */
+@keyframes flagPulse{0%,100%{border-left-color:rgba(240,85,61,.4)}50%{border-left-color:rgba(240,85,61,.9)}}
+.flagged-row td:first-child{border-left:3px solid rgba(240,85,61,.6)}
+
+/* Payment progress bar */
+.pay-bar-track{background:var(--s3);border-radius:4px;height:6px;overflow:hidden;min-width:100px}
+.pay-bar-fill{height:100%;border-radius:4px;transition:width .5s cubic-bezier(.4,0,.2,1)}
+
+/* Mobile hamburger */
+.hamburger{display:none;align-items:center;justify-content:center;background:none;border:1px solid var(--bdr);border-radius:7px;font-size:18px;cursor:pointer;padding:5px 8px;color:var(--txt);transition:background .15s}
+.hamburger:hover{background:var(--s3)}
+.sidebar-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.52);z-index:199;backdrop-filter:blur(2px)}
+
+/* Mobile bottom nav */
+.mobile-bottom-nav{display:none;position:fixed;bottom:0;left:0;right:0;background:var(--s1);border-top:1px solid var(--bdr);z-index:150;padding:4px 0 env(safe-area-inset-bottom,4px)}
+.mbn-inner{display:flex;align-items:stretch;overflow-x:auto;scrollbar-width:none}
+.mbn-inner::-webkit-scrollbar{display:none}
+.mbn-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:6px 10px;border:none;background:none;color:var(--muted);font-size:9px;font-weight:600;font-family:var(--font);cursor:pointer;white-space:nowrap;flex-shrink:0;border-radius:8px;transition:all .15s;min-width:52px}
+.mbn-btn.act{color:var(--g)}
+.mbn-btn .mbn-ic{font-size:18px;line-height:1}
+.mbn-bdg{background:var(--err);color:#fff;font-family:var(--mono);font-size:7px;padding:1px 4px;border-radius:8px;min-width:14px;text-align:center;margin-top:-2px}
+
+@media(max-width:767px){
+  .hamburger{display:flex}
+  .sidebar-backdrop.open{display:block}
+  .sidebar{
+    position:fixed;top:0;left:0;height:100vh;z-index:200;
+    transform:translateX(-100%);transition:transform .25s cubic-bezier(.4,0,.2,1);
+    box-shadow:4px 0 24px rgba(0,0,0,.18)
+  }
+  .sidebar.open{transform:translateX(0)}
+  .main{width:100%;padding-bottom:72px}
+  .content{padding:14px 12px}
+  .topbar{padding:10px 12px;gap:8px}
+  .tb-title{font-size:17px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tb-right{gap:6px;flex-shrink:0}
+  .chip-hide-mobile{display:none!important}
+  .btn-lbl{display:none!important}
+  .kpi-grid{grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:14px}
+  .kpi-v{font-size:20px!important}
+  .fg2{grid-template-columns:1fr!important}
+  .fg3{grid-template-columns:1fr!important}
+  .sg{grid-template-columns:1fr}
+  .settings-grid{grid-template-columns:1fr!important}
+  .dash-2col{grid-template-columns:1fr!important}
+  .op-grid{grid-template-columns:1fr}
+  .modal{max-width:100vw!important;width:100%!important;max-height:92vh;border-radius:14px 14px 0 0;margin-top:auto}
+  .modal-lg{width:100%!important}
+  .ov{align-items:flex-end;padding:0}
+  .wb{flex-direction:column;align-items:flex-start;gap:4px}
+  .wv{font-size:26px}
+  .ph{flex-wrap:wrap;gap:8px}
+  .tabs{overflow-x:auto;flex-wrap:nowrap;scrollbar-width:none}
+  .tabs::-webkit-scrollbar{display:none}
+  .tab{white-space:nowrap;font-size:12px;padding:8px 14px}
+  .seg{flex-wrap:wrap}
+  .mobile-bottom-nav{display:block}
+  .mbn-inner{justify-content:space-around}
+}
+@media(max-width:400px){
+  .kpi-grid{grid-template-columns:1fr 1fr}
+  .kpi-v{font-size:17px!important}
+  .content{padding:10px 8px}
+}
+
+/* Print-only / print-hide */
+.print-only{display:none!important}
+@media print{
+  /* Hide everything on the page */
+  body *{visibility:hidden!important}
+  /* Show invoice print area */
+  .inv-print-area,.inv-print-area *{visibility:visible!important}
+  .inv-print-area{
+    position:fixed!important;top:0!important;left:0!important;
+    width:100%!important;height:auto!important;
+    background:#fff!important;z-index:9999!important;
+    color:#14201a!important;
+    --s1:#fff;--s2:#edf4ee;--s3:#e2ede4;
+    --bdr:#c8d9cb;--bdr2:#b4c8b8;
+    --g:#178a34;--g2:#0e6e27;
+    --txt:#14201a;--muted:#4a6e52;
+    --warn:#9a6200;--err:#b02000;--info:#006090;--purple:#5030b0;
+    --ovl-sm:rgba(0,0,0,.035);
+  }
+  .inv-print-area *{color:inherit}
+  .inv-print-area .panel{
+    box-shadow:none!important;border:1px solid #c8d9cb!important;
+    border-radius:4px!important;background:#fff!important;
+  }
+  .inv-print-area .card-sm{
+    border:1px solid #c8d9cb!important;background:#f4f8f5!important;color:#14201a!important;
+  }
+  .inv-print-area table{color:#14201a!important}
+  .inv-print-area th{background:#e2ede4!important;color:#14201a!important}
+  .inv-print-area td{border-bottom:1px solid #d4e4d7!important;color:#14201a!important}
+  .inv-print-area .mn{color:#14201a!important}
+  .inv-print-area .tmu{color:#4a6e52!important}
+  .inv-print-area .tg{color:#178a34!important}
+  .inv-print-area .badge{border:1px solid #999!important}
+  .inv-print-area .print-hide{display:none!important;visibility:hidden!important}
+  .inv-print-area .print-only{display:block!important;visibility:visible!important}
+  .inv-print-footer{margin-top:40px;padding-top:20px;border-top:2px solid #333}
+  /* Show receipt print area */
+  .rcpt-print-area,.rcpt-print-area *{visibility:visible!important}
+  .rcpt-print-area{
+    position:fixed!important;top:0!important;left:50%!important;
+    transform:translateX(-50%)!important;
+    width:320px!important;height:auto!important;
+    background:#fff!important;z-index:9999!important;
+    color:#111!important;
+  }
+  .rcpt-print-area .rcpt{
+    border:1px solid #ccc!important;box-shadow:none!important;
+    background:#fff!important;color:#111!important;
+  }
+  .rcpt-print-area .rh{background:#f5f5f5!important;color:#111!important;border-bottom:1px dashed #bbb!important}
+  .rcpt-print-area .rr,.rcpt-print-area .rrttl{border-bottom:1px dashed #ddd!important;color:#111!important}
+  .rcpt-print-area .rcpt-actions{display:none!important;visibility:hidden!important}
+  *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
+}
+
+/* Utils */
+.fx{display:flex}.aic{align-items:center}.jsb{justify-content:space-between}.jsc{justify-content:center}
+.g2{gap:8px}.g3{gap:12px}.g4{gap:16px}
+.mt1{margin-top:4px}.mt2{margin-top:8px}.mt3{margin-top:12px}.mt4{margin-top:16px}
+.mb1{margin-bottom:4px}.mb2{margin-bottom:8px}.mb3{margin-bottom:12px}.mb4{margin-bottom:16px}
+.tsm{font-size:12px}.tmu{color:var(--muted)}.tg{color:var(--g)}.tw2{color:var(--warn)}.te{color:var(--err)}
+.fw7{font-weight:700}.fw8{font-weight:800}
+.fmn{font-family:var(--mono)}.fhd{font-family:var(--head)}
+.wf{width:100%}
+.dvdr{border:none;border-top:1px solid var(--bdr);margin:14px 0}
+.truncate{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* RTL / Arabic */
+[dir="rtl"]{font-family:'Cairo',sans-serif}
+[dir="rtl"] .sidebar{border-right:none;border-left:1px solid var(--bdr)}
+[dir="rtl"] .sbl-title,[dir="rtl"] .sbl-sub{text-align:center}
+[dir="rtl"] .nav-lbl{text-align:right}
+[dir="rtl"] .nb{text-align:right;flex-direction:row-reverse}
+[dir="rtl"] .nb .ic{margin-left:10px;margin-right:0}
+[dir="rtl"] .sbf{text-align:right}
+[dir="rtl"] .role-lbl,[dir="rtl"] .role-name,[dir="rtl"] .role-detail{text-align:right}
+[dir="rtl"] .topbar{flex-direction:row-reverse}
+[dir="rtl"] .tb-right{flex-direction:row-reverse}
+[dir="rtl"] .ph{flex-direction:row-reverse}
+[dir="rtl"] .field label{text-align:right;display:block}
+[dir="rtl"] .fi{text-align:right}
+[dir="rtl"] .alrt{flex-direction:row-reverse;text-align:right}
+[dir="rtl"] th,[dir="rtl"] td{text-align:right}
+[dir="rtl"] .kpi{text-align:right}
+[dir="rtl"] .fx.aic.jsb{flex-direction:row-reverse}
+[dir="rtl"] .bdg{margin-left:0;margin-right:auto}
+[dir="rtl"] .logout-btn{width:100%}
+[dir="rtl"] .mbn-btn{flex-direction:column}
+[dir="rtl"] select.fi{background-position:left 10px center;padding-right:12px;padding-left:32px}
+`;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   HELPERS
+═══════════════════════════════════════════════════════════════════════════ */
+const fmt    = n => new Intl.NumberFormat("fr-DZ",{minimumFractionDigits:3,maximumFractionDigits:3}).format(n) + " DA";
+const fmtN   = n => new Intl.NumberFormat("fr-DZ",{minimumFractionDigits:3,maximumFractionDigits:3}).format(n);
+const fmtTs  = ts => new Date(ts).toLocaleString("fr-DZ",{dateStyle:"short",timeStyle:"short"});
+const uid    = () => "D" + Date.now().toString(36).toUpperCase();
+const uidC   = () => "C" + Date.now().toString(36).toUpperCase();
+const uidU   = () => "U" + Date.now().toString(36).toUpperCase();
+const nowIso = () => { const n=new Date(); return new Date(n.getTime()-n.getTimezoneOffset()*60000).toISOString().slice(0,16); };
+const tsMatchesPfx = (ts, pfx) => { const d=new Date(ts); if(pfx.length===4) return d.getFullYear().toString()===pfx; return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`===pfx; };
+/* ─── VAT HELPERS (Phase 5.5) — single source of truth for HT↔TTC (19% Algerian VAT) ─ */
+const toTTC = (amtHT,  vatSubject) => vatSubject ? Math.round(amtHT  * 1.19 * 100) / 100 : amtHT;
+const toHT  = (amtTTC, vatSubject) => vatSubject ? Math.round((amtTTC / 1.19) * 100) / 100 : amtTTC;
+
+const creditPct   = c => c.creditLimit ? Math.round((c.consumed/c.creditLimit)*100) : 0;
+const creditColor = p => p>=90 ? "var(--err)" : p>=70 ? "var(--warn)" : "var(--g)";
+
+function statusBadgeProps(s) {
+  return {
+    paid:      ["b-cash",  "✅ Payé"],
+    settled:   ["b-warn",  "⏳ Non payé"],
+    ok:        ["b-warn",  "⏳ Non payé"],
+    flagged:   ["b-err",   "⚠ Limite"],
+    cancelled: ["b-muted", "Annulé"],
+    pending:   ["b-warn",  "⏳ Attente"],
+  }[s] || ["b-info", s];
+}
+
+function StatusBadge({s}) {
+  const [cls,lbl] = statusBadgeProps(s);
+  return <span className={`badge ${cls}`}>{lbl}</span>;
+}
+
+function ClientStatusBadge({s}) {
+  const map = {
+    approved:    ["b-ok",     "✓ Approuvé"],
+    under_review:["b-warn",   "🔍 En révision"],
+    pending_docs:["b-err",    "📄 Docs manquants"],
+    rejected:    ["b-err",    "✗ Rejeté"],
+  };
+  const [cls,lbl] = map[s] || ["b-muted", s];
+  return <span className={`badge ${cls}`}>{lbl}</span>;
+}
+
+function UserStatusBadge({s}) {
+  const map = {
+    active: ["b-ok",   "Actif"],
+    pending:["b-warn", "En attente"],
+    inactive:["b-muted","Inactif"],
+  };
+  const [cls,lbl] = map[s] || ["b-muted", s];
+  return <span className={`badge ${cls}`}>{lbl}</span>;
+}
+
+const uidInv = () => "INV-" + Date.now().toString(36).toUpperCase();
+
+const REQUIRED_DOCS_PRIVATE = ["Registre de Commerce (RC)","Numéro d'Identification Fiscale (NIF)","Assurance Responsabilité Civile","Extrait de rôle apuré","Convention signée"];
+const REQUIRED_DOCS_STATE   = ["Arrêté ou délibération d'assemblée communale","Convention signée","Bon de commande ou réquisition"];
+const REQUIRED_DOCS_CREDIT  = ["Registre de Commerce (RC)","Numéro d'Identification Fiscale (NIF)","Demande d'ouverture de compte crédit","Garantie ou caution bancaire"];
+const REQUIRED_DOCS_PREPAID = ["Copie CNI ou RC (pour entreprise)","Bon de versement / virement bancaire du solde","Demande de préchargement signée"];
+const REQUIRED_DOCS_COLLECT = ["Contrat de collecte et traitement signé","Carte(s) grise(s) des camions de collecte","Autorisation de collecte (arrêté communal ou wilaya)"];
+
+function InvoiceStatusBadge({s}) {
+  const map = {
+    pending: ["b-warn",   "⏳ En attente"],
+    partial: ["b-purple", "💳 Partiel"],
+    paid:    ["b-ok",     "✓ Payée"],
+    overdue: ["b-err",    "🔴 Impayée"],
+  };
+  const [cls,lbl] = map[s] || ["b-muted", s];
+  return <span className={`badge ${cls}`}>{lbl}</span>;
+}
+
+function PayProgress({inv, compact=false}) {
+  if (!inv || inv.totalAmount<=0) return null;
+  const paid = inv.paidAmount||0;
+  if (paid<=0) return null;
+  const pct  = Math.min(100, Math.round((paid/inv.totalAmount)*100));
+  const rem  = inv.totalAmount - paid;
+  const col  = pct>=100?"var(--g)":pct>=50?"var(--warn)":"var(--err)";
+  if (compact) {
+    return (
+      <div style={{minWidth:90}}>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,fontFamily:"var(--mono)",color:"var(--muted)",marginBottom:3}}>
+          <span style={{color:col}}>{pct}%</span>
+          {rem>0&&<span style={{color:"var(--warn)",whiteSpace:"nowrap"}}>{fmt(rem)} DA</span>}
+        </div>
+        <div className="pay-bar-track"><div className="pay-bar-fill" style={{width:`${pct}%`,background:col}}/></div>
+      </div>
+    );
+  }
+  return (
+    <div style={{minWidth:160,textAlign:"right"}}>
+      <div style={{fontSize:9,fontFamily:"var(--mono)",color:col,fontWeight:700,marginBottom:2}}>{pct}% réglé</div>
+      {rem>0&&<div style={{fontSize:10,fontFamily:"var(--mono)",color:"var(--err)",fontWeight:700,whiteSpace:"nowrap",marginBottom:3}}>{fmt(rem)} DA restant</div>}
+      <div className="pay-bar-track"><div className="pay-bar-fill" style={{width:`${pct}%`,background:col}}/></div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   AUTHENTICATED FETCH WRAPPER
+   Adds Authorization: Bearer <token> to every request that is not the
+   login endpoint.  Handles 401 → auto-logout so the user is never silently
+   stuck in a broken state.
+═══════════════════════════════════════════════════════════════════════════ */
+let _authLogout = null;
+const registerLogout = fn => { _authLogout = fn; };
+
+const apiFetch = async (url, opts = {}) => {
+  const token = localStorage.getItem('authToken');
+  const res = await fetch(url, {
+    ...opts,
+    headers: {
+      ...(opts.headers || {}),
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+    },
+  });
+  if (res.status === 401) {
+    localStorage.removeItem('authToken');
+    localStorage.removeItem('authUser');
+    localStorage.removeItem('currentPage');
+    if (_authLogout) _authLogout();
+    throw new Error('Session expirée. Veuillez vous reconnecter.');
+  }
+  return res;
+};
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   LOGIN SCREEN
+═══════════════════════════════════════════════════════════════════════════ */
+function LoginScreen({onLogin, onRegister, company, lang, toggleLang}) {
+  const t = (fr, ar) => lang === "ar" ? ar : fr;
+  const [email, setEmail]   = useState("");
+  const [password, setPwd]  = useState("");
+  const [error, setError]   = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleLogin = async () => {
+    setError("");
+    setLoading(true);
+    try {
+      // Use plain fetch (not apiFetch) — a 401 here means wrong password, not session expiry
+      const res = await fetch('/api/auth/login',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({email,password}),
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error||"Identifiants incorrects."); setLoading(false); return; }
+      setLoading(false);
+      // Server now returns { token, user }
+      onLogin(data.user, data.token);
+    } catch {
+      setError("Erreur de connexion au serveur.");
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="login-shell" dir={lang==="ar"?"rtl":"ltr"} style={lang==="ar"?{fontFamily:"'Cairo',sans-serif"}:{}}>
+      <div className="login-box">
+        <div style={{position:"absolute",top:16,right:16}}>
+          <button className="chip chip-dim" style={{cursor:"pointer"}} onClick={toggleLang}>
+            {lang==="ar"?"🇫🇷 FR":"🇩🇿 عر"}
+          </button>
+        </div>
+        <div className="login-logo">
+          <img src="/logo.png" alt="CETManager" className="login-logo-icon"/>
+          <div className="login-company">{cof(company,'name')}</div>
+          <div className="login-wilaya">{cof(company,'wilaya')}</div>
+        </div>
+        <div className="login-title">{t("Connexion","تسجيل الدخول")}</div>
+        {error && <div className="alrt ae mb3"><span>⚠</span><span>{error}</span></div>}
+        <div className="fg" style={{gap:14}}>
+          <div className="field">
+            <label>{t("Adresse e-mail","البريد الإلكتروني")}</label>
+            <input className="fi" type="email" placeholder="exemple@demo-cet.dz" value={email}
+              onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleLogin()}/>
+          </div>
+          <div className="field">
+            <label>{t("Mot de passe","كلمة المرور")}</label>
+            <input className="fi" type="password" placeholder="••••••••" value={password}
+              onChange={e=>setPwd(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleLogin()}/>
+          </div>
+          <button className="btn bp bfw" style={{marginTop:4}} onClick={handleLogin} disabled={loading||!email||!password}>
+            {loading?t("Connexion...","جارٍ الدخول..."):t("🔐 Se connecter","🔐 دخول")}
+          </button>
+        </div>
+        <div className="login-switch">
+          {t("Pas encore de compte ?","ليس لديك حساب؟")} <a onClick={onRegister}>{t("Demander un accès opérateur","طلب وصول مشغل")}</a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   REGISTER SCREEN
+═══════════════════════════════════════════════════════════════════════════ */
+function RegisterScreen({onBack, onRegistered, sites, company, lang, toggleLang}) {
+  const t = (fr, ar) => lang === "ar" ? ar : fr;
+  const [form, setForm] = useState({name:"",email:"",password:"",phone:"",siteId:"CET-JIJ"});
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState("");
+  const [consentChecked, setConsentChecked] = useState(false);
+  const [showConsentText, setShowConsentText] = useState(false);
+  const set = (k,v) => setForm(f=>({...f,[k]:v}));
+
+  const [pendingUser, setPendingUser] = useState(null);
+  const [codeInput,   setCodeInput]   = useState("");
+  const [codeError,   setCodeError]   = useState("");
+  const [verified,    setVerified]    = useState(false);
+
+  const handleRegister = async () => {
+    if (!form.name||!form.email||!form.password||!form.phone) { setError(t("Veuillez remplir tous les champs.","يرجى ملء جميع الحقول.")); return; }
+    if (form.password.length < 8) { setError(t("Le mot de passe doit contenir au moins 8 caractères (lettres et chiffres).","كلمة المرور يجب أن تحتوي على 8 أحرف على الأقل (أحرف وأرقام).")); return; }
+    if (!/[A-Za-z]/.test(form.password)||!/[0-9]/.test(form.password)) { setError(t("Le mot de passe doit contenir au moins une lettre et un chiffre.","يجب أن تحتوي كلمة المرور على حرف ورقم على الأقل.")); return; }
+    if (!consentChecked) { setError(t("Vous devez accepter la politique de confidentialité pour continuer.","يجب أن توافق على سياسة الخصوصية للمتابعة.")); return; }
+    const newUser = {
+      id:uidU(), name:form.name, email:form.email, password:form.password,
+      role:"operator", status:"pending", phone:form.phone, siteId:form.siteId,
+      matricule:"", createdAt:new Date().toISOString().slice(0,10),
+    };
+    await apiFetch('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(newUser)});
+    try {
+      await apiFetch('/api/compliance/consent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:newUser.id,scope:'registration'})});
+    } catch(e) {}
+    onRegistered(newUser);
+    setPendingUser(newUser);
+    setSent(true);
+  };
+
+  const handleVerifyCode = async () => {
+    if (!codeInput.trim()) { setCodeError("Veuillez saisir le code."); return; }
+    setCodeError("");
+    const res = await apiFetch(`/api/users/${pendingUser.id}/verify-email`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({code: codeInput.trim()}),
+    });
+    if (res.ok) { setVerified(true); }
+    else { const d = await res.json(); setCodeError(d.error||"Code incorrect."); }
+  };
+
+  if (sent && verified) return (
+    <div className="login-shell" dir={lang==="ar"?"rtl":"ltr"} style={lang==="ar"?{fontFamily:"'Cairo',sans-serif"}:{}}>
+      <div className="login-box" style={{textAlign:"center"}}>
+        <div style={{fontSize:48,marginBottom:16}}>✅</div>
+        <div style={{fontFamily:"var(--head)",fontSize:20,fontWeight:800,marginBottom:10}}>{t("E-mail vérifié !","تم التحقق من البريد!")}</div>
+        <p style={{color:"var(--muted)",fontSize:13,lineHeight:1.7,marginBottom:24}}>
+          {t("Votre adresse e-mail a été confirmée. L'administrateur va maintenant valider votre compte.",
+             "تم تأكيد بريدك الإلكتروني. سيقوم المسؤول الآن بالتحقق من حسابك.")}
+        </p>
+        <button className="btn bp bfw" onClick={onBack}>{t("← Retour à la connexion","← العودة إلى تسجيل الدخول")}</button>
+      </div>
+    </div>
+  );
+
+  if (sent) return (
+    <div className="login-shell" dir={lang==="ar"?"rtl":"ltr"} style={lang==="ar"?{fontFamily:"'Cairo',sans-serif"}:{}}>
+      <div className="login-box">
+        <div className="login-logo">
+          <img src="/logo.png" alt="CETManager" className="login-logo-icon"/>
+          <div className="login-company">{cof(company,'short')}</div>
+          <div className="login-wilaya">{cof(company,'wilaya')}</div>
+        </div>
+        <div className="login-title">{t("Vérification de l'e-mail","التحقق من البريد الإلكتروني")}</div>
+        <div className="alrt ai mb3">
+          <span>📬</span>
+          <span style={{fontSize:12}}>
+            {t("Demande envoyée. Contactez l'administrateur pour obtenir votre ",
+               "تم إرسال الطلب. تواصل مع المسؤول للحصول على ")}<strong>{t("code de vérification à 6 chiffres","رمز التحقق المكون من 6 أرقام")}</strong>{t(", puis saisissez-le ci-dessous.",", ثم أدخله أدناه.")}
+          </span>
+        </div>
+        {codeError && <div className="alrt ae mb3"><span>⚠</span><span>{codeError}</span></div>}
+        <div className="fg" style={{gap:12}}>
+          <div className="field">
+            <label>{t("Code de vérification","رمز التحقق")}</label>
+            <input className="fi" placeholder="123456" maxLength={6} value={codeInput}
+              onChange={e=>setCodeInput(e.target.value.replace(/\D/g,''))}
+              style={{letterSpacing:8,fontSize:20,textAlign:"center"}}/>
+          </div>
+          <button className="btn bp bfw" onClick={handleVerifyCode}>{t("✓ Confirmer le code","✓ تأكيد الرمز")}</button>
+          <button className="btn bg bfw" onClick={onBack}>{t("← Retour à la connexion","← العودة إلى تسجيل الدخول")}</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="login-shell" dir={lang==="ar"?"rtl":"ltr"} style={lang==="ar"?{fontFamily:"'Cairo',sans-serif"}:{}}>
+      <div className="login-box">
+        <div style={{position:"absolute",top:16,right:16}}>
+          <button className="chip chip-dim" style={{cursor:"pointer"}} onClick={toggleLang}>
+            {lang==="ar"?"🇫🇷 FR":"🇩🇿 عر"}
+          </button>
+        </div>
+        <div className="login-logo">
+          <img src="/logo.png" alt="CETManager" className="login-logo-icon"/>
+          <div className="login-company">{cof(company,'short')}</div>
+          <div className="login-wilaya">{cof(company,'wilaya')}</div>
+        </div>
+        <div className="login-title">{t("Demande d'accès opérateur","طلب وصول مشغل")}</div>
+        {error && <div className="alrt ae mb3"><span>⚠</span><span>{error}</span></div>}
+        <div className="alrt ai mb3" style={{marginBottom:16}}>
+          <span>ℹ️</span>
+          <span style={{fontSize:11}}>{t("Votre compte sera créé après validation par l'administrateur. Remplissez vos informations complètes.",
+            "سيتم إنشاء حسابك بعد التحقق من قِبَل المسؤول. أدخل معلوماتك كاملةً.")}</span>
+        </div>
+        <div className="fg" style={{gap:12}}>
+          <div className="field"><label>{t("Nom complet","الاسم الكامل")}</label>
+            <input className="fi" placeholder={t("Prénom Nom","الاسم الأول والأخير")} value={form.name} onChange={e=>set("name",e.target.value)}/>
+          </div>
+          <div className="field"><label>{t("Adresse e-mail professionnelle","البريد الإلكتروني المهني")}</label>
+            <input className="fi" type="email" placeholder="prenom.nom@demo-cet.dz" value={form.email} onChange={e=>set("email",e.target.value)}/>
+          </div>
+          <div className="field"><label>{t("Téléphone","الهاتف")}</label>
+            <input className="fi" placeholder="000 00 00 00" value={form.phone} onChange={e=>set("phone",e.target.value)}/>
+          </div>
+          <div className="field"><label>{t("Site d'affectation souhaité","الموقع المطلوب")}</label>
+            <select className="fi" value={form.siteId} onChange={e=>set("siteId",e.target.value)}>
+              {sites.map(s=><option key={s.id} value={s.id}>{s.name} — {s.region}</option>)}
+            </select>
+          </div>
+          <div className="field"><label>{t("Mot de passe (min. 6 caractères)","كلمة المرور (6 أحرف على الأقل)")}</label>
+            <input className="fi" type="password" placeholder="••••••••" value={form.password} onChange={e=>set("password",e.target.value)}/>
+          </div>
+          <div style={{border:"1px solid var(--bdr)",borderRadius:10,padding:"12px 14px",background:"var(--s2)"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:showConsentText?10:0}}>
+              <span style={{fontSize:12,fontWeight:600}}>
+                🔒 {t("Politique de confidentialité — Loi 18-07","سياسة الخصوصية — القانون 18-07")}
+              </span>
+              <button type="button" onClick={()=>setShowConsentText(p=>!p)} style={{fontSize:11,color:"var(--info)",background:"none",border:"none",cursor:"pointer",padding:"2px 6px"}}>
+                {showConsentText ? t("▲ Réduire","▲ طي") : t("▼ Lire","▼ اقرأ")}
+              </button>
+            </div>
+            {showConsentText && (
+              <div style={{fontSize:11,color:"var(--muted)",lineHeight:1.7,marginBottom:10,maxHeight:160,overflowY:"auto",paddingRight:4}} dir={lang==="ar"?"rtl":"ltr"}>
+                {lang==="ar" ? (
+                  <span style={{fontFamily:"'Cairo',sans-serif"}}>
+                    تقوم <strong>CETManager الديمو</strong> بمعالجة بياناتك الشخصية (الاسم، البريد الإلكتروني، الهاتف، الرقم الوظيفي) لأغراض إدارة مراكز الردم التقني وفقًا للقانون <strong>18-07</strong>. مدة الاحتفاظ: 10 سنوات. يحق لك الاطلاع والتصحيح والحذف والمعارضة عبر قسم الإعدادات ← المطابقة والبيانات. التواصل: admin@demo-cet.dz
+                  </span>
+                ) : (
+                  <span>
+                    <strong>CETManager Démo</strong> traite vos données personnelles (nom, email, téléphone, matricule) pour la gestion des centres d'enfouissement technique, conformément à la <strong>Loi 18-07</strong> du 10 juin 2018. Durée de conservation : 10 ans. Vous disposez d'un droit d'accès, de rectification, d'effacement et d'opposition via Paramètres → Conformité & Données. Contact : admin@demo-cet.dz
+                  </span>
+                )}
+              </div>
+            )}
+            <label style={{display:"flex",alignItems:"flex-start",gap:10,cursor:"pointer"}}>
+              <input type="checkbox" checked={consentChecked} onChange={e=>setConsentChecked(e.target.checked)}
+                style={{marginTop:2,width:16,height:16,accentColor:"var(--g)",flexShrink:0}}/>
+              <span style={{fontSize:12,lineHeight:1.5}}>
+                {t(
+                  "J'ai lu et j'accepte la politique de confidentialité. Je consens au traitement de mes données personnelles par CETManager Démo conformément à la Loi 18-07.",
+                  "لقد قرأت وأوافق على سياسة الخصوصية. أوافق على معالجة بياناتي الشخصية من قِبَل CETManager الديمو وفقًا للقانون 18-07."
+                )}
+              </span>
+            </label>
+          </div>
+          <button className="btn bp bfw" style={{marginTop:4,opacity:consentChecked?1:.55}} onClick={handleRegister}>{t("📨 Envoyer la demande","📨 إرسال الطلب")}</button>
+          <button className="btn bg bfw" onClick={onBack}>{t("← Retour","← رجوع")}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CONSENT MODAL — Loi 18-07 Art. 7 (Lawful basis: consent)
+═══════════════════════════════════════════════════════════════════════════ */
+function ConsentModal({ user, lang, onAccepted }) {
+  const t = (fr, ar) => lang === "ar" ? ar : fr;
+  const [tab, setTab] = useState("fr");
+  const [loading, setLoading] = useState(false);
+
+  const handleAccept = async () => {
+    setLoading(true);
+    try {
+      await apiFetch('/api/compliance/consent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: user.id, scope: 'system_access' }),
+      });
+    } catch(e) { /* non-blocking: log error but let user in */ }
+    setLoading(false);
+    onAccepted();
+  };
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:9999,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+      <div style={{background:"var(--s1)",borderRadius:16,maxWidth:640,width:"100%",maxHeight:"90vh",display:"flex",flexDirection:"column",boxShadow:"0 8px 48px rgba(0,0,0,.25)",border:"1px solid var(--bdr)"}}>
+        <div style={{padding:"20px 24px 0",flexShrink:0}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+            <span style={{fontSize:28}}>🔒</span>
+            <div>
+              <div style={{fontFamily:"var(--head)",fontWeight:800,fontSize:18,letterSpacing:".04em"}}>
+                {t("Politique de confidentialité","سياسة الخصوصية")}
+              </div>
+              <div style={{fontSize:11,color:"var(--muted)"}}>
+                {t("Loi 18-07 · Conformité Algérienne","القانون 18-07 · الامتثال الجزائري")}
+              </div>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:4,borderBottom:"1px solid var(--bdr)",marginBottom:0}}>
+            {[["fr","🇫🇷 Français"],["ar","🇩🇿 العربية"]].map(([id,lbl])=>(
+              <button key={id} onClick={()=>setTab(id)} style={{padding:"6px 14px",border:"none",background:"none",cursor:"pointer",fontWeight:tab===id?700:400,borderBottom:tab===id?"2px solid var(--g)":"2px solid transparent",color:tab===id?"var(--g)":"var(--muted)",fontSize:12,marginBottom:-1}}>
+                {lbl}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{padding:"16px 24px",overflowY:"auto",flex:1,lineHeight:1.7,fontSize:13}}>
+          {tab==="fr" ? (
+            <div>
+              <p style={{marginBottom:10}}><strong>CETManager Démo</strong> traite vos données personnelles pour la gestion des centres d'enfouissement technique, conformément à la <strong>Loi 18-07</strong> du 10 juin 2018 relative à la protection des données personnelles.</p>
+              <div style={{background:"var(--s2)",borderRadius:8,padding:"12px 14px",marginBottom:12,border:"1px solid var(--bdr)"}}>
+                <div style={{fontWeight:700,marginBottom:6,fontSize:12,textTransform:"uppercase",letterSpacing:".06em",color:"var(--muted)"}}>Données collectées</div>
+                {[["Nom, email, téléphone","Identification et authentification","Contrat d'emploi"],["Matricule, rôle, site assigné","Habilitation et traçabilité","Obligation légale (Loi 25-11)"],["Historique des actions","Audit de sécurité","Obligation légale"],].map(([d,f,b])=>(
+                  <div key={d} style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:4,fontSize:11,padding:"4px 0",borderBottom:"1px solid var(--bdr)"}}>
+                    <span><strong>{d}</strong></span><span style={{color:"var(--muted)"}}>{f}</span><span style={{color:"var(--info)"}}>{b}</span>
+                  </div>
+                ))}
+              </div>
+              <p style={{marginBottom:8}}><strong>Vos droits (Art. 20-25)</strong> : accès, rectification, effacement, portabilité et opposition — via la section <em>Conformité & Données</em> dans Paramètres.</p>
+              <p style={{marginBottom:8}}>Conservation : <strong>10 ans</strong> (données opérationnelles) · <strong>5 ans</strong> (journal d'audit).</p>
+              <p style={{color:"var(--muted)",fontSize:11}}>Contact DPD : admin@demo-cet.dz · Autorité : ANPDP Algérie</p>
+            </div>
+          ) : (
+            <div dir="rtl" style={{fontFamily:"'Cairo',sans-serif"}}>
+              <p style={{marginBottom:10}}><strong>CETManager الديمو</strong> تعالج بياناتك الشخصية لأغراض تسيير مراكز الردم التقني، وفقًا للقانون <strong>18-07</strong> المؤرخ في 10 يونيو 2018 المتعلق بحماية البيانات الشخصية.</p>
+              <div style={{background:"var(--s2)",borderRadius:8,padding:"12px 14px",marginBottom:12,border:"1px solid var(--bdr)"}}>
+                <div style={{fontWeight:700,marginBottom:6,fontSize:12,color:"var(--muted)"}}>البيانات المجمعة</div>
+                {[["الاسم، البريد الإلكتروني، الهاتف","تعريف الهوية والمصادقة","عقد العمل"],["الرقم الوظيفي، الدور، الموقع","الصلاحيات والتتبع","التزام قانوني (ق. 25-11)"],["سجل الإجراءات","مراجعة الأمان","التزام قانوني"],].map(([d,f,b])=>(
+                  <div key={d} style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:4,fontSize:11,padding:"4px 0",borderBottom:"1px solid var(--bdr)"}}>
+                    <span><strong>{d}</strong></span><span style={{color:"var(--muted)"}}>{f}</span><span style={{color:"var(--info)"}}>{b}</span>
+                  </div>
+                ))}
+              </div>
+              <p style={{marginBottom:8}}><strong>حقوقك (المواد 20-25)</strong>: الاطلاع، التصحيح، الحذف، قابلية النقل، والمعارضة — عبر قسم <em>المطابقة والبيانات</em> في الإعدادات.</p>
+              <p style={{marginBottom:8}}>مدة الاحتفاظ: <strong>10 سنوات</strong> (البيانات التشغيلية) · <strong>5 سنوات</strong> (سجل المراجعة).</p>
+              <p style={{color:"var(--muted)",fontSize:11}}>التواصل: admin@demo-cet.dz · السلطة المختصة: ANPDP الجزائر</p>
+            </div>
+          )}
+        </div>
+
+        <div style={{padding:"16px 24px",borderTop:"1px solid var(--bdr)",flexShrink:0,display:"flex",gap:10,alignItems:"center"}}>
+          <div style={{flex:1,fontSize:11,color:"var(--muted)"}}>
+            {t("En cliquant sur Accepter, vous consentez au traitement de vos données conformément à la politique ci-dessus (v1.0).","بالنقر على قبول، فإنك توافق على معالجة بياناتك وفقًا للسياسة أعلاه (الإصدار 1.0).")}
+          </div>
+          <button className="btn bp" style={{whiteSpace:"nowrap",minWidth:120}} onClick={handleAccept} disabled={loading}>
+            {loading ? t("Enregistrement...","جارٍ الحفظ...") : t("✅ Accepter","✅ قبول")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ROOT
+═══════════════════════════════════════════════════════════════════════════ */
+export default function App() {
+  const [authUser, setAuthUser] = useState(() => {
+  try { return JSON.parse(localStorage.getItem('authUser')); } catch { return null; }
+});
+  const [authScreen,  setAuthScreen]  = useState("login"); // "login" | "register"
+  const [page, setPage] = useState(() => { try { return localStorage.getItem('currentPage') || "dashboard"; } catch { return "dashboard"; } });
+  const [discharges,  setDischarges]  = useState([]);
+  const [clients,     setClients]     = useState([]);
+  const [users,       setUsers]       = useState([]);
+  const [sites,       setSites]       = useState([]);
+  const [wasteTypes,  setWasteTypes]  = useState([]);
+  const [online,      setOnline]      = useState(true);
+  const [clock,       setClock]       = useState(new Date());
+  const [theme,       setTheme]       = useState(() => { try { return localStorage.getItem('theme') || 'light'; } catch { return 'light'; } });
+  const [lang,        setLang]        = useState(() => { try { return localStorage.getItem('lang') || 'fr'; } catch { return 'fr'; } });
+  const toggleLang = () => setLang(l => { const n = l==="ar"?"fr":"ar"; localStorage.setItem('lang',n); return n; });
+  const [loading,     setLoading]     = useState(true);
+  const [invoices,    setInvoices]    = useState([]);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [companyTrucks, setCompanyTrucks] = useState([]);
+  const [showConsent,   setShowConsent]   = useState(false);
+  const [docTypes,    setDocTypes]    = useState(() => {
+    try { return JSON.parse(localStorage.getItem('cet_docTypes')) || {private:[...REQUIRED_DOCS_PRIVATE],state:[...REQUIRED_DOCS_STATE],prepaid:[...REQUIRED_DOCS_PREPAID],collect:[...REQUIRED_DOCS_COLLECT]}; }
+    catch { return {private:[...REQUIRED_DOCS_PRIVATE],state:[...REQUIRED_DOCS_STATE],prepaid:[...REQUIRED_DOCS_PREPAID],collect:[...REQUIRED_DOCS_COLLECT]}; }
+  });
+  const updateDocTypes = types => {
+    setDocTypes(types);
+    localStorage.setItem('cet_docTypes', JSON.stringify(types));
+  };
+  const [company, setCompany] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('cet_company')) || COMPANY_FIELDS_DEFAULT; }
+    catch { return COMPANY_FIELDS_DEFAULT; }
+  });
+  const updateCompany = c => { setCompany(c); localStorage.setItem('cet_company', JSON.stringify(c)); };
+
+  // Register the logout handler so apiFetch can trigger it on 401
+  useEffect(()=>{
+    registerLogout(()=>{ setAuthUser(null); setAuthScreen("login"); });
+  },[]);
+
+  useEffect(()=>{ const t=setInterval(()=>setClock(new Date()),60000); return()=>clearInterval(t); },[]);
+  useEffect(()=>{ document.documentElement.setAttribute("data-theme", theme); },[theme]);
+  useEffect(()=>{
+    // Skip data load if there is no token — go straight to login screen
+    if (!localStorage.getItem('authToken')) { setLoading(false); return; }
+    const storedUser = (() => { try { return JSON.parse(localStorage.getItem('authUser')); } catch { return null; } })();
+    const isAdminBoot = storedUser?.role === 'admin';
+    // Admin-only endpoints (403 for operators) use a resolved empty array for non-admin boots
+    const adminOnly = p => isAdminBoot ? apiFetch(p).then(r=>r.json()) : Promise.resolve([]);
+    Promise.all([
+      apiFetch('/api/sites').then(r=>r.json()),
+      apiFetch('/api/waste-types').then(r=>r.json()),
+      apiFetch('/api/clients').then(r=>r.json()),
+      apiFetch('/api/discharges').then(r=>r.json()),
+      apiFetch('/api/company-trucks').then(r=>r.json()),
+      adminOnly('/api/users'),
+      adminOnly('/api/invoices'),
+    ]).then(([s,wt,c,d,ct,u,inv])=>{
+      const sites_=Array.isArray(s)?s:[], wasteTypes_=Array.isArray(wt)?wt:[];
+      const clients_=Array.isArray(c)?c:[], discharges_=Array.isArray(d)?d:[];
+      const companyTrucks_=Array.isArray(ct)?ct:[];
+      setSites(sites_);
+      setWasteTypes(wasteTypes_);
+      setClients(clients_);
+      setDischarges(discharges_);
+      setCompanyTrucks(companyTrucks_);
+      setUsers(Array.isArray(u)?u:[]);
+      setInvoices(Array.isArray(inv)?inv:[]);
+      setLoading(false);
+      // Keep the essential dataset available for offline discharge entry.
+      saveReferenceData({ sites: sites_, wasteTypes: wasteTypes_, clients: clients_, discharges: discharges_, companyTrucks: companyTrucks_ }).catch(()=>{});
+    }).catch(()=>{
+      // Network unreachable at boot — fall back to the last cached dataset
+      // so gate operators can still open the app and log discharges offline.
+      loadReferenceData().then(cached=>{
+        setSites(cached.sites);
+        setWasteTypes(cached.wasteTypes);
+        setClients(cached.clients);
+        setDischarges(cached.discharges);
+        setCompanyTrucks(cached.companyTrucks);
+        setLoading(false);
+      }).catch(()=>setLoading(false));
+    });
+  },[]);
+
+  if (loading) return (
+    <LangCtx.Provider value={lang}>
+      <style>{STYLES}</style>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:"var(--bg)",flexDirection:"column",gap:16}}>
+        <img src="/logo.png" alt="CETManager" style={{width:80,height:80,objectFit:"contain",marginBottom:4}}/>
+        <div style={{fontFamily:"var(--head)",fontSize:22,fontWeight:800,color:"var(--g)",letterSpacing:".04em"}}>{lang==="ar"?"جارٍ التحميل…":"Chargement…"}</div>
+        <div style={{fontFamily:"var(--mono)",fontSize:11,color:"var(--muted)"}}>{lang==="ar"?"الاتصال بقاعدة البيانات…":"Connexion à la base de données…"}</div>
+      </div>
+    </LangCtx.Provider>
+  );
+
+  if (!authUser) {
+    if (authScreen === "register") return (
+      <LangCtx.Provider value={lang}>
+        <style>{STYLES}</style>
+        <RegisterScreen onBack={()=>setAuthScreen("login")} sites={sites}
+          onRegistered={u=>{ setUsers(p=>[...p,u]); setAuthScreen("login"); }} company={company}
+          lang={lang} toggleLang={toggleLang}/>
+      </LangCtx.Provider>
+    );
+    return (
+      <LangCtx.Provider value={lang}>
+        <style>{STYLES}</style>
+        <LoginScreen onLogin={(u, token)=>{
+          localStorage.setItem('authToken', token);
+          localStorage.setItem('authUser', JSON.stringify(u));
+          setAuthUser(u);
+          const p=u.role==="admin"?"dashboard":"gate";
+          localStorage.setItem('currentPage',p);
+          setPage(p);
+          apiFetch(`/api/compliance/consent/${u.id}`)
+            .then(r=>r.json())
+            .then(d=>{ if(!d.consented) setShowConsent(true); })
+            .catch(()=>{});
+        }}
+          onRegister={()=>setAuthScreen("register")} company={company}
+          lang={lang} toggleLang={toggleLang}/>
+      </LangCtx.Provider>
+    );
+  }
+
+  const isAdmin = authUser.role === "admin";
+  const opSite  = !isAdmin ? sites.find(s=>s.id===authUser.siteId) : null;
+
+  const addDischarge = async d => {
+    const applyLocally = record => {
+      setDischarges(p=>[record,...p]);
+      if (record.payMethod==="convention"||record.payMethod==="credit"||record.payMethod==="prepaid") {
+        setClients(p=>p.map(c=>c.id===record.clientId?{...c,consumed:c.consumed+record.total}:c));
+      }
+    };
+    if (!navigator.onLine) {
+      const offlineRecord = { ...d, id: d.id || makeOfflineId(), _offlinePending: true };
+      await queueDischarge({ endpoint: '/api/discharges', method: 'POST', body: d });
+      applyLocally(offlineRecord);
+      return;
+    }
+    try {
+      await apiFetch('/api/discharges',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
+      applyLocally(d);
+    } catch (e) {
+      // Request failed but we still have a connection reported — could be a
+      // dropped connection mid-request. Queue it rather than lose the entry.
+      const offlineRecord = { ...d, id: d.id || makeOfflineId(), _offlinePending: true };
+      await queueDischarge({ endpoint: '/api/discharges', method: 'POST', body: d });
+      applyLocally(offlineRecord);
+    }
+  };
+  const updateDischarge = async d => {
+    await apiFetch(`/api/discharges/${d.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
+    setDischarges(p=>p.map(x=>x.id===d.id?d:x));
+    // Refresh clients to get correct consumed from server
+    apiFetch('/api/clients').then(r=>r.json()).then(c=>{ if(Array.isArray(c)) setClients(c); });
+  };
+
+  const addClient    = async c  => {
+    await apiFetch('/api/clients',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)});
+    setClients(p=>[...p,c]);
+  };
+  const updateClient = async c  => {
+    await apiFetch(`/api/clients/${c.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)});
+    setClients(p=>p.map(x=>x.id===c.id?c:x));
+  };
+  const deleteClient = async id => {
+    await apiFetch(`/api/clients/${id}`,{method:'DELETE'});
+    setClients(p=>p.filter(c=>c.id!==id));
+  };
+  const addUser      = async u  => {
+    const res = await apiFetch('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(u)});
+    const data = await res.json();
+    setUsers(p=>[...p,{...u, verificationCode: data.verificationCode||null, emailVerified:false}]);
+    return data;
+  };
+  const updateUser   = async u  => {
+    await apiFetch(`/api/users/${u.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(u)});
+    setUsers(p=>p.map(x=>x.id===u.id?u:x));
+  };
+  const deleteUser   = async id => {
+    await apiFetch(`/api/users/${id}`,{method:'DELETE'});
+    setUsers(p=>p.filter(u=>u.id!==id));
+  };
+  const updateSite   = async s  => {
+    await apiFetch(`/api/sites/${s.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(s)});
+    setSites(p=>p.map(x=>x.id===s.id?s:x));
+  };
+  const updateWT     = async wt => {
+    await apiFetch(`/api/waste-types/${wt.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(wt)});
+    setWasteTypes(p=>p.map(x=>x.id===wt.id?wt:x));
+  };
+  const addCompanyTruck    = async t => {
+    await apiFetch('/api/company-trucks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(t)});
+    setCompanyTrucks(p=>[...p,t]);
+  };
+  const updateCompanyTruck = async t => {
+    await apiFetch(`/api/company-trucks/${t.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(t)});
+    setCompanyTrucks(p=>p.map(x=>x.id===t.id?t:x));
+  };
+  const deleteCompanyTruck = async id => {
+    await apiFetch(`/api/company-trucks/${id}`,{method:'DELETE'});
+    setCompanyTrucks(p=>p.filter(t=>t.id!==id));
+  };
+  const addInvoice = async inv => {
+    await apiFetch('/api/invoices',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(inv)});
+    setInvoices(p=>{
+      const ex=p.find(x=>x.id===inv.id);
+      // Never overwrite a paid or partial invoice — payment data must never be erased
+      if(ex && (ex.status==="paid"||ex.status==="partial")) return p;
+      return ex?p.map(x=>x.id===inv.id?inv:x):[...p,inv];
+    });
+  };
+  const updateInvoice = async inv => {
+    await apiFetch(`/api/invoices/${inv.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(inv)});
+    setInvoices(p=>p.map(x=>{
+      if(x.id!==inv.id) return x;
+      // Never let an update silently erase payment data
+      if((x.status==="paid"||x.status==="partial") && inv.status==="pending") return x;
+      return inv;
+    }));
+  };
+  // Refetch the full invoices list from the server (called after bill payments to sync paid_amount)
+  const refreshInvoices = async () => {
+    try {
+      const inv = await apiFetch('/api/invoices').then(r=>r.json());
+      setInvoices(Array.isArray(inv)?inv:[]);
+    } catch(e) {}
+  };
+
+  const flagged = discharges.filter(d=>d.status==="flagged").length;
+  const pendingOps = users.filter(u=>u.role==="operator"&&u.status==="pending").length;
+  const pendingClients = clients.filter(c=>(c.type==="convention"||c.type==="rotation"||c.type==="credit")&&c.status!=="approved"&&c.status!=="rejected").length;
+  const alerts = flagged + pendingOps + pendingClients;
+
+  const navAdmin = [
+    {id:"dashboard",  lbl:lang==="ar"?"لوحة التحكم":"Tableau de Bord",   ic:"📊"},
+    {id:"gate",       lbl:lang==="ar"?"تسجيل إيداع":"Saisie Dépôt",       ic:"🚛"},
+    {id:"discharges", lbl:lang==="ar"?"التفريغات":"Déchargements",        ic:"🗂", bdg:flagged||null},
+    {id:"clients",    lbl:lang==="ar"?"العملاء":"Clients",                ic:"🏢", bdg:pendingClients||null},
+    {id:"operators",  lbl:lang==="ar"?"المشغلون":"Opérateurs",            ic:"👷", bdg:pendingOps||null},
+    {id:"invoice",    lbl:lang==="ar"?"الفواتير / الكشوف":"Factures / Relevés", ic:"🧾"},
+    {id:"settings",   lbl:lang==="ar"?"الإعدادات":"Paramètres",           ic:"⚙️"},
+  ];
+  const navOp = [
+    {id:"gate",       lbl:lang==="ar"?"تسجيل إيداع":"Saisie Dépôt",       ic:"🚛"},
+    {id:"discharges", lbl:lang==="ar"?"السجل":"Historique",                ic:"🗂"},
+  ];
+  const nav = isAdmin ? navAdmin : navOp;
+  const pageTitle = [...navAdmin,...navOp].find(n=>n.id===page)?.lbl ?? "—";
+  const closeSidebar = () => setSidebarOpen(false);
+
+  return (
+    <LangCtx.Provider value={lang}>
+      <style>{STYLES}</style>
+      <OfflineBanner onSynced={()=>{
+        // Offline discharges just synced — refetch the real records so
+        // temporary offline entries are replaced and clients' consumed
+        // totals reflect what the server actually accepted.
+        apiFetch('/api/discharges').then(r=>r.json()).then(d=>{ if(Array.isArray(d)) setDischarges(d); }).catch(()=>{});
+        apiFetch('/api/clients').then(r=>r.json()).then(c=>{ if(Array.isArray(c)) setClients(c); }).catch(()=>{});
+      }}/>
+      {showConsent && <ConsentModal user={authUser} lang={lang} onAccepted={()=>setShowConsent(false)}/>}
+      <div className="shell" dir={lang==="ar"?"rtl":"ltr"}>
+        <div className={`sidebar-backdrop${sidebarOpen?" open":""}`} onClick={closeSidebar}/>
+        <aside className={`sidebar${sidebarOpen?" open":""}`}>
+          <div className="sbl">
+            <img src="/logo.png" alt="CETManager" style={{width:48,height:48,objectFit:"contain",marginBottom:6,display:"block",margin:"0 auto 6px"}}/>
+            <div className="sbl-title">{cof(company,'short')}</div>
+            <div className="sbl-sub">{cof(company,'wilaya')}</div>
+          </div>
+          <nav>
+            <div className="nav-grp">
+              <div className="nav-lbl">{lang==="ar"?"التنقل":"Navigation"}</div>
+              {nav.map(n=>(
+                <button key={n.id} className={`nb${page===n.id?" act":""}`} onClick={()=>{setPage(n.id);closeSidebar();}}>
+                  <span className="ic">{n.ic}</span>{n.lbl}
+                  {n.bdg?<span className="bdg">{n.bdg}</span>:null}
+                </button>
+              ))}
+            </div>
+          </nav>
+          <div className="sbf">
+            <div className="role-card">
+              <div className="role-lbl">{lang==="ar"?"متصل بصفة":"Connecté en tant que"}</div>
+              <div className="role-name">{authUser.name}</div>
+              <div className="role-detail">{isAdmin?(lang==="ar"?"👔 مدير":"👔 Administrateur"):(lang==="ar"?"🦺 مشغل":"🦺 Opérateur")}{opSite?` · ${opSite.name}`:""}</div>
+            </div>
+            <button className="logout-btn" onClick={()=>{setAuthUser(null);localStorage.removeItem('authToken');localStorage.removeItem('authUser');localStorage.removeItem('currentPage');setAuthScreen("login");}}>
+              🚪 {lang==="ar"?"تسجيل الخروج":"Déconnexion"}
+            </button>
+          </div>
+        </aside>
+
+        <main className="main">
+          <div className="topbar">
+            <button className="hamburger" onClick={()=>setSidebarOpen(o=>!o)} aria-label="Menu">☰</button>
+            <div className="tb-title">{pageTitle}</div>
+            <div className="tb-right">
+              <span className="chip chip-dim fmn chip-hide-mobile" style={{fontSize:10}}>
+                {clock.toLocaleTimeString("fr-DZ",{hour:"2-digit",minute:"2-digit"})}
+              </span>
+              <button className={`chip ${online?"chip-ok":"chip-warn"} chip-hide-mobile`} onClick={()=>setOnline(o=>!o)}>
+                {online?(lang==="ar"?"🟢 متصل":"🟢 En ligne"):(lang==="ar"?"🟡 غير متصل":"🟡 Hors ligne")}
+              </button>
+              {alerts>0&&<span className="chip chip-err">⚠ {alerts}</span>}
+              <button className="chip chip-dim" style={{cursor:"pointer"}} onClick={toggleLang}
+                title={lang==="ar"?"Passer en Français":"التبديل إلى العربية"}>
+                {lang==="ar"?"🇫🇷 FR":"🇩🇿 عر"}
+              </button>
+              <button className="chip chip-dim" style={{cursor:"pointer"}}
+onClick={()=>setTheme(t=>{ const next = t==="dark"?"light":"dark"; localStorage.setItem('theme', next); return next; })}                title={theme==="dark"?(lang==="ar"?"وضع فاتح":"Passer en mode clair"):(lang==="ar"?"وضع داكن":"Passer en mode sombre")}>
+                {theme==="dark"?"☀️":"🌙"}
+              </button>
+            </div>
+          </div>
+          <div className="content">
+            {page==="dashboard"  && <PageDashboard discharges={discharges} clients={clients} sites={sites} wasteTypes={wasteTypes} setPage={setPage}/>}
+            {page==="gate"       && <PageGate addDischarge={addDischarge} addClient={addClient} clients={clients} sites={sites} wasteTypes={wasteTypes} discharges={discharges} authUser={authUser} isAdmin={isAdmin} company={company} companyTrucks={companyTrucks}/>}
+            {page==="discharges" && <PageDischarges discharges={discharges} setDischarges={setDischarges} sites={sites} wasteTypes={wasteTypes} users={users} clients={clients} invoices={invoices} updateClient={updateClient} updateDischarge={updateDischarge} isAdmin={isAdmin} authUser={authUser} company={company}/>}
+            {page==="clients"    && <PageClients clients={clients} discharges={discharges} updateClient={updateClient} addClient={addClient} deleteClient={deleteClient} isAdmin={isAdmin} docTypes={docTypes} sites={sites} company={company} wasteTypes={wasteTypes} authUser={authUser}/>}
+            {page==="operators"  && <PageOperators users={users} sites={sites} addUser={addUser} updateUser={updateUser} deleteUser={deleteUser} authUser={authUser}/>}
+            {page==="invoice"    && <PageInvoice clients={clients} discharges={discharges} sites={sites} wasteTypes={wasteTypes} invoices={invoices} addInvoice={addInvoice} updateInvoice={updateInvoice} updateDischarge={updateDischarge} company={company} refreshInvoices={refreshInvoices}/>}
+            {page==="settings"   && <PageSettings sites={sites} wasteTypes={wasteTypes} updateSite={updateSite} updateWT={updateWT} authUser={authUser} updateUser={updateUser} setAuthUser={setAuthUser} docTypes={docTypes} updateDocTypes={updateDocTypes} company={company} updateCompany={updateCompany} companyTrucks={companyTrucks} addCompanyTruck={addCompanyTruck} updateCompanyTruck={updateCompanyTruck} deleteCompanyTruck={deleteCompanyTruck} clients={clients} updateClient={updateClient}/>}
+            {page==="schema"     && <PageSchema/>}
+            <ConflictReview/>
+          </div>
+          <nav className="mobile-bottom-nav">
+            <div className="mbn-inner">
+              {nav.map(n=>(
+                <button key={n.id} className={`mbn-btn${page===n.id?" act":""}`} onClick={()=>setPage(n.id)}>
+                  <span className="mbn-ic">{n.ic}</span>
+                  <span>{n.lbl.split(" ")[0]}</span>
+                  {n.bdg?<span className="mbn-bdg">{n.bdg}</span>:null}
+                </button>
+              ))}
+            </div>
+          </nav>
+        </main>
+      </div>
+    </LangCtx.Provider>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DASHBOARD
+═══════════════════════════════════════════════════════════════════════════ */
+function PageDashboard({discharges,clients,sites,wasteTypes,setPage}) {
+  const t = useT();
+  const rotIds    = new Set(clients.filter(c=>c.type==="rotation").map(c=>c.id));
+  const totalRev  = discharges.reduce((s,d)=>s+d.total,0);
+  const totalTons = discharges.filter(d=>!rotIds.has(d.clientId)).reduce((s,d)=>s+d.net,0);
+  const cashRev   = discharges.filter(d=>d.payMethod==="cash"||d.payMethod==="tpe").reduce((s,d)=>s+d.total,0);
+  const tpeCount  = discharges.filter(d=>d.payMethod==="tpe").length;
+  const cashCount = discharges.filter(d=>d.payMethod==="cash").length;
+  const flagged   = discharges.filter(d=>d.status==="flagged");
+  const pendingC  = clients.filter(c=>(c.type==="convention"||c.type==="rotation")&&(c.status==="pending_docs"||c.status==="under_review"));
+  const byWaste   = wasteTypes.map(w=>({...w,
+    count:discharges.filter(d=>d.wasteType===w.id).length,
+    tons:discharges.filter(d=>d.wasteType===w.id).reduce((s,d)=>s+d.net,0),
+  }));
+  const month = new Date().toLocaleString("fr-DZ",{month:"long",year:"numeric"});
+
+  return (
+    <>
+      {flagged.length>0&&(
+        <div className="alrt ae mb4">
+          <span style={{fontSize:18}}>🚨</span>
+          <div>
+            <strong>{flagged.length} {t("déchargement(s) avec dépassement de crédit","تفريغ(ات) تجاوزت حد الائتمان")}</strong>
+            <div className="mt1">{flagged.map(d=>d.clientName).filter((v,i,a)=>a.indexOf(v)===i).join(", ")}</div>
+          </div>
+        </div>
+      )}
+      {pendingC.length>0&&(
+        <div className="alrt aw mb4">
+          <span style={{fontSize:18}}>📋</span>
+          <div>
+            <strong>{pendingC.length} {t("client(s) convention en attente de validation","عميل(اء) اتفاقية في انتظار المصادقة")}</strong>
+            <div className="mt1">{pendingC.map(c=>c.name).join(", ")}</div>
+          </div>
+        </div>
+      )}
+
+      <div className="kpi-grid">
+        {[
+          {kc:"var(--g)",    ic:"💰", l:t("Recettes Totales","الإيرادات الإجمالية"),    v:fmt(totalRev),           s:t("Cumul depuis le début de l'activité","مجموع منذ بدء النشاط")},
+          {kc:"var(--info)", ic:"⚖️", l:t("Tonnage Total","الحمولة الإجمالية"),          v:fmtN(totalTons)+" t",    s:discharges.length+" "+t("déchargements","تفريغ")},
+          {kc:"var(--g2)",   ic:"💳", l:t("Paiements Directs","المدفوعات المباشرة"),      v:fmt(cashRev),             s:`${cashCount} ${t("espèces","نقد")} · ${tpeCount} TPE`},
+          {kc:"var(--warn)", ic:"🏭", l:t("Sites Actifs","المواقع النشطة"),              v:String(sites.length),    s:"3 CET · 1 CDI · "+t("Wilaya Démo","ولاية الديمو")},
+        ].map(k=>(
+          <div key={k.l} className="kpi" style={{"--kc":k.kc}}>
+            <div className="kpi-i">{k.ic}</div>
+            <div className="kpi-l">{k.l}</div>
+            <div className="kpi-v" style={{fontSize:k.v.length>12?16:22}}>{k.v}</div>
+            <div className="kpi-s">{k.s}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="dash-2col" style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginBottom:20}}>
+        <div className="panel">
+          <div className="ph">
+            <span className="pt">{t("Derniers Déchargements","آخر التفريغات")}</span>
+            <button className="btn bg bsm" onClick={()=>setPage("discharges")}>{t("Voir tout →","عرض الكل →")}</button>
+          </div>
+          <div className="tw">
+            <table>
+              <thead><tr><th>{t("Camion","الشاحنة")}</th><th>{t("Client","العميل")}</th><th>{t("Opération","العملية")}</th><th>{t("Net(t)","الصافي(ط)")}</th><th>{t("Total","المجموع")}</th><th>{t("Statut","الحالة")}</th></tr></thead>
+              <tbody>
+                {discharges.slice(0,6).map(d=>(
+                  <tr key={d.id}>
+                    <td><span className="mn">{d.truck}</span></td>
+                    <td style={{maxWidth:110}} className="truncate">{d.clientName}</td>
+                    <td>{d.opType==="collect"
+                      ?<span className="badge" style={{background:"rgba(139,92,246,.12)",color:"var(--purple)",border:"1px solid rgba(139,92,246,.3)",fontSize:9,whiteSpace:"nowrap"}}>{t("🚛 Collecte","🚛 جمع")}</span>
+                      :<span className="badge" style={{background:"rgba(46,201,92,.1)",color:"var(--g)",border:"1px solid rgba(46,201,92,.3)",fontSize:9,whiteSpace:"nowrap"}}>{t("🏭 Traitement","🏭 معالجة")}</span>
+                    }</td>
+                    <td><span className="mn">{fmtN(d.net)}</span></td>
+                    <td><span className="mn tg">{fmt(d.total)}</span></td>
+                    <td><StatusBadge s={d.status}/></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div className="panel">
+            <div className="ph"><span className="pt">{t("Capacité des Sites","طاقة المواقع")}</span></div>
+            <div style={{padding:"14px 18px",display:"flex",flexDirection:"column",gap:14}}>
+              {sites.map(s=>{
+                const pct=Math.round((s.used/s.capacity)*100);
+                const col=pct>80?"var(--err)":pct>60?"var(--warn)":"var(--g)";
+                return (
+                  <div key={s.id}>
+                    <div className="fx aic jsb mb1">
+                      <div className="fx aic g2">
+                        <span style={{fontWeight:600,fontSize:13}}>{s.name}</span>
+                        <span className={`badge ${s.type==="CDI"?"b-warn":"b-info"}`} style={{fontSize:8}}>{s.type}</span>
+                        {s.commune&&<span className="tsm tmu" style={{fontSize:10}}>📍 {s.commune}</span>}
+                      </div>
+                      <span className="mn tsm tmu">{pct}%</span>
+                    </div>
+                    <div className="cbt"><div className="cbf" style={{width:`${pct}%`,background:col}}/></div>
+                    <div className="fx jsb mt1">
+                      <span className="tsm tmu">{s.region}</span>
+                      <span className="tsm fmn tmu">{(s.used/1000).toFixed(0)}k/{(s.capacity/1000).toFixed(0)}k t</span>
+                    </div>
+                    {s.acceptedWaste&&s.acceptedWaste.length>0&&(
+                      <div className="fx mt1" style={{gap:3,flexWrap:"wrap"}}>
+                        {s.acceptedWaste.map(wId=>(
+                          <span key={wId} className="badge" style={{fontSize:8,padding:"1px 5px",background:"var(--s3)",color:"var(--muted)",border:"1px solid var(--bdr)"}}>{wId}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="panel">
+            <div className="ph"><span className="pt">{t("Répartition par Type","التوزيع حسب النوع")}</span></div>
+            <div style={{padding:"10px 18px",display:"flex",flexDirection:"column",gap:8}}>
+              {byWaste.filter(w=>w.count>0).map(w=>(
+                <div key={w.id} className="fx aic jsb">
+                  <div>
+                    <span style={{fontSize:12,fontWeight:600}}>{w.label}</span>
+                    <span className="tsm tmu" style={{marginLeft:8}}>{w.count} {t("dépôts","إيداع")}</span>
+                  </div>
+                  <span className="mn tsm tg">{fmtN(w.tons)} t</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="ph"><span className="pt">{t("Clients Compte — Quotas, Crédit & Prépayé","حسابات العملاء — الحصص، الائتمان والمدفوع مسبقاً")}</span></div>
+        <div className="tw">
+          <table>
+            <thead><tr><th>{t("Client","العميل")}</th><th>{t("Type","النوع")}</th><th>{t("Mode","الوضع")}</th><th>{t("Limite","الحد")}</th><th>{t("Utilisé","المستخدم")}</th><th>{t("Progression","التقدم")}</th><th>{t("Statut","الحالة")}</th></tr></thead>
+            <tbody>
+              {clients.filter(c=>c.type==="convention"||c.type==="rotation"||c.type==="credit"||c.type==="prepaid").map(c=>{
+                const yr = new Date().getFullYear().toString();
+                const monthPfx = `${yr}-${String(new Date().getMonth()+1).padStart(2,"0")}`;
+                const isMonthly = c.payFrequency==="monthly";
+                const pfx = isMonthly ? monthPfx : yr;
+                const periodDs = discharges.filter(d=>d.clientId===c.id&&tsMatchesPfx(d.ts,pfx)&&d.status!=="cancelled");
+                const usedW   = periodDs.reduce((s,d)=>s+d.net,0);
+                const usedRot = periodDs.length;
+                const isRotation = c.type==="rotation";
+                const isPrepaid  = c.type==="prepaid";
+                const prepaidPct = isPrepaid&&c.creditLimit>0 ? Math.round((c.consumed/c.creditLimit)*100) : 0;
+                const pct = isPrepaid
+                  ? prepaidPct
+                  : c.creditEnabled
+                    ? creditPct(c)
+                    : c.weightLimitYear>0 ? Math.round(((isRotation?usedRot:usedW)/c.weightLimitYear)*100) : 0;
+                const col = creditColor(pct);
+                return (
+                  <tr key={c.id}>
+                    <td style={{fontWeight:600}}>{c.name}</td>
+                    <td>
+                      {isPrepaid
+                        ?<span className="badge b-info">🎫 {t("Prépayé","مدفوع مسبقاً")}</span>
+                        :isRotation
+                          ?<span className="badge" style={{background:"rgba(251,146,60,.12)",color:"var(--orange)",border:"1px solid rgba(251,146,60,.3)"}}>🔄 {t("Rotation","دوراني")}</span>
+                          :<span className={`badge ${c.clientType==="state"?"b-purple":"b-info"}`}>{c.clientType==="state"?t("🏛 État","🏛 دولة"):t("🏢 Privé","🏢 خاص")}</span>}
+                    </td>
+                    <td>
+                      {isPrepaid
+                        ?<span className="badge b-info">🎫 {t("Solde Prépayé","رصيد مدفوع مسبقاً")}</span>
+                        :c.creditEnabled
+                          ?<span className="badge b-purple">💳 {t("Crédit DA","ائتمان دج")}</span>
+                          :isRotation
+                            ?<span className="badge" style={{background:"rgba(251,146,60,.12)",color:"var(--orange)",border:"1px solid rgba(251,146,60,.3)"}}>{c.payFrequency==="monthly"?t("🔄 Rotations/mois","🔄 دورات/شهر"):t("🔄 Rotations/an","🔄 دورات/سنة")}</span>
+                            :<span className="badge b-info">{c.payFrequency==="monthly"?t("⚖️ Tonnage/mois","⚖️ طن/شهر"):t("⚖️ Tonnage/an","⚖️ طن/سنة")}</span>}
+                    </td>
+                    <td><span className="mn">{c.status==="approved"?(isPrepaid?fmt(c.creditLimit):c.creditEnabled?fmt(c.creditLimit):c.weightLimitYear?(isRotation?c.weightLimitYear+" rot.":(fmtN(c.weightLimitYear)+" t")):"—"):"—"}</span></td>
+                    <td>{c.status==="approved"?(isPrepaid?(
+                      c.consumed>c.creditLimit
+                        ?<span className="mn" style={{color:"var(--err)",fontWeight:700}}>⚠ {fmt(c.consumed-c.creditLimit)} <span style={{fontSize:9,fontWeight:400,color:"var(--err)"}}>{t("dépassement","تجاوز")}</span></span>
+                        :<span className="mn">{fmt(c.consumed)}</span>
+                    ):c.creditEnabled?(
+                      c.consumed>c.creditLimit
+                        ?<span className="mn" style={{color:"var(--err)",fontWeight:700}}>⚠ {fmt(c.consumed-c.creditLimit)} <span style={{fontSize:9,fontWeight:400,color:"var(--err)"}}>{t("dette","دين")}</span></span>
+                        :<span className="mn">{fmt(c.consumed)}</span>
+                    ):isRotation?<span className="mn">{usedRot+" "+t("rot.","دورة")}</span>:<span className="mn">{fmtN(usedW)+" t"}</span>):<span className="mn">—</span>}</td>
+                    <td style={{minWidth:120}}>
+                      {c.status==="approved"&&(isPrepaid?c.creditLimit:(c.creditEnabled?c.creditLimit:c.weightLimitYear))>0?(
+                        <div className="fx aic g2">
+                          <div className="cbt" style={{flex:1}}><div className="cbf" style={{width:`${Math.min(pct,100)}%`,background:col}}/></div>
+                          <span className="mn tsm" style={{color:col}}>{pct}%</span>
+                        </div>
+                      ):<span className="tsm tmu">—</span>}
+                    </td>
+                    <td><ClientStatusBadge s={c.status}/></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   GATE — SAISIE OPÉRATEUR
+═══════════════════════════════════════════════════════════════════════════ */
+function PageGate({addDischarge, addClient, clients, sites, wasteTypes, discharges, authUser, company, companyTrucks}) {
+  const t = useT();
+  const isAdmin = authUser.role === "admin";
+  const defaultSite = isAdmin ? sites[0]?.id : authUser.siteId;
+
+  const [mode,         setMode]         = useState("convention"); // "convention" | "rotation" | "prepaid" | "cash"
+  const [opType,       setOpType]       = useState("treatment");  // "treatment" | "collect"
+  const [collectMode,  setCollectMode]  = useState("tonnage");   // "tonnage" | "rotation" | "prepaid" | "cash"
+  const [step,         setStep]         = useState(1);
+  const [form,         setForm]         = useState({siteId:defaultSite, truck:"", clientId:"", wasteType:"", gross:"", tare:""});
+  const [payModal,     setPayModal]     = useState(false);
+  const [cashConf,     setCashConf]     = useState(false);
+  const [selPayMethod, setSelPayMethod] = useState("cash"); // "cash" | "tpe"
+  const [lastEntry,    setLastEntry]    = useState(null);
+  const [hint,         setHint]         = useState(null);
+  const [convSubMode,  setConvSubMode]  = useState("tonnage"); // "tonnage" | "rotation" for convention clients with rotationLimit
+
+  // New cash client registration
+  const [newCashModal, setNewCashModal] = useState(false);
+  const [cashForm,     setCashForm]     = useState({name:"",nif:"",phone:"",truck:"",tare:""});
+
+  const set = (k,v) => setForm(f=>({...f,[k]:v}));
+  const site = sites.find(s=>s.id===form.siteId);
+  // Filter by site's accepted waste list (if configured), otherwise fall back to site type
+  const siteWasteTypes = site
+    ? (site.acceptedWaste&&site.acceptedWaste.length>0
+        ? wasteTypes.filter(w=>site.acceptedWaste.includes(w.id))
+        : wasteTypes.filter(w=>w.siteTypes.includes(site.type)))
+    : wasteTypes;
+  // Further restrict by the selected client's allowedWasteTypes when set by admin
+  const selectedClientForWaste = clients.find(c=>c.id===form.clientId);
+  const clientAllowedWaste = selectedClientForWaste?.allowedWasteTypes;
+  const validWasteTypes = (clientAllowedWaste&&clientAllowedWaste.length>0)
+    ? siteWasteTypes.filter(w=>clientAllowedWaste.includes(w.id))
+    : siteWasteTypes;
+
+  // Fix wasteType if current one not valid for selected site
+  const wasteTypeValid = validWasteTypes.find(w=>w.id===form.wasteType);
+  if (validWasteTypes.length && !wasteTypeValid && form.wasteType !== "") {
+    setForm(f=>({...f, wasteType:validWasteTypes[0].id}));
+  }
+  if (validWasteTypes.length && !form.wasteType) {
+    setForm(f=>({...f, wasteType:validWasteTypes[0].id}));
+  }
+
+  const siteClientFilter = c => {
+    if (isAdmin || !authUser.siteId || authUser.siteId === "all") return true;
+    return Array.isArray(c.assignedSites) && c.assignedSites.includes(authUser.siteId);
+  };
+  const approvedConvention = clients.filter(c=>c.type==="convention"&&c.status==="approved"&&!c.creditEnabled&&siteClientFilter(c));
+  const approvedRotation   = clients.filter(c=>c.type==="rotation"&&c.status==="approved"&&siteClientFilter(c));
+  const approvedCredit     = clients.filter(c=>c.status==="approved"&&c.creditEnabled&&siteClientFilter(c));
+  const approvedPrepaid    = clients.filter(c=>c.type==="prepaid"&&c.status==="approved"&&siteClientFilter(c));
+  const approvedCash       = clients.filter(c=>c.type==="daily"&&c.status==="approved"&&siteClientFilter(c));
+
+  // Collect+Treatment: approved clients with treat_and_collect or both services, assigned to current site
+  const treatAndCollectClients = clients.filter(c=>
+    c.status==="approved" &&
+    (c.serviceType==="treat_and_collect"||c.serviceType==="both") &&
+    (!(c.assignedSites?.length>0) || c.assignedSites.includes(form.siteId))
+  );
+  const collectTonnageClients  = treatAndCollectClients.filter(c=>c.collectBillingMode!=="rotation"&&c.type!=="prepaid"&&c.type!=="daily");
+  const collectRotationClients = treatAndCollectClients.filter(c=>c.collectBillingMode==="rotation");
+  const collectPrepaidClients  = treatAndCollectClients.filter(c=>c.type==="prepaid");
+  const collectCashClients     = treatAndCollectClients.filter(c=>c.type==="daily");
+  const activeCompanyTrucks = (companyTrucks||[]).filter(t=>t.status==="active");
+
+  const onTruck = plate => {
+    set("truck", plate);
+    const t = TRUCKS_DB.find(t=>t.plate===plate.toUpperCase());
+    if (t) {
+      const c = clients.find(c=>c.id===t.clientId);
+      setHint({t,c});
+      set("clientId", t.clientId);
+      set("tare", String(t.tare));
+      const firstAllowed = t.allowed.find(a => validWasteTypes.find(w=>w.id===a));
+      if (firstAllowed) set("wasteType", firstAllowed);
+    } else {
+      setHint(null);
+    }
+  };
+
+  const gross = parseFloat(form.gross)||0;
+  const tare  = parseFloat(form.tare)||0;
+  const net   = Math.max(0, gross-tare);
+  const wt    = wasteTypes.find(w=>w.id===form.wasteType) || validWasteTypes[0];
+  const total = net * (wt?.price || 0);
+  const client = clients.find(c=>c.id===form.clientId);
+  const isPrepaid   = client && client.type==="prepaid";
+  const isRotationClient = client && client.type==="rotation";
+  const isOnAccount = client && (client.type==="convention"||client.type==="rotation"||client.creditEnabled||isPrepaid);
+  // Credit clients: check money limit; convention (non-credit): check weight/year limit
+  const currentYear = new Date().getFullYear().toString();
+  const currentMonthPrefix = `${currentYear}-${String(new Date().getMonth()+1).padStart(2,"0")}`;
+  const isMonthlyQuota = client && !client.creditEnabled && !isRotationClient && client.payFrequency==="monthly";
+  const isMonthlyRotation = client && isRotationClient && client.payFrequency==="monthly";
+  const periodPrefix = (isMonthlyQuota||isMonthlyRotation) ? currentMonthPrefix : currentYear;
+  const usedThisYear = client && !client.creditEnabled && !isRotationClient
+    ? discharges.filter(d=>d.clientId===client.id&&tsMatchesPfx(d.ts,periodPrefix)&&d.status!=="cancelled").reduce((s,d)=>s+d.net,0)
+    : 0;
+  const usedRotations = isRotationClient
+    ? discharges.filter(d=>d.clientId===client.id&&tsMatchesPfx(d.ts,periodPrefix)&&d.status!=="cancelled").length
+    : 0;
+  // Use collect pricing in collect mode for accurate limit checks
+  const effectiveTotalForLimit = opType==="collect"
+    ? ((collectMode==="rotation"||client?.collectBillingMode==="rotation")?(wt?.collectRotationPrice??0):net*(wt?.collectPrice??0))
+    : total;
+  const wouldExceedCredit    = client?.creditEnabled && client.creditLimit>0 && (client.consumed+effectiveTotalForLimit)>client.creditLimit;
+  const wouldExceedWeight    = client && !client.creditEnabled && !isRotationClient && client.weightLimitYear>0 && (usedThisYear+net)>client.weightLimitYear;
+  const wouldExceedRotations = isRotationClient && client.weightLimitYear>0 && (usedRotations+1)>client.weightLimitYear;
+  // Prepaid clients (type="prepaid", creditEnabled=false) — enforce prepaid balance
+  const wouldExceedPrepaid    = isPrepaid && !client.creditEnabled && client.creditLimit>0 && (client.consumed+effectiveTotalForLimit)>client.creditLimit;
+  const alreadyAtPrepaidLimit = isPrepaid && !client.creditEnabled && client.creditLimit>0 && client.consumed>=client.creditLimit;
+  // Convention clients with an admin-set rotation quota
+  const isConvWithRotation      = mode==="convention" && client && client.type==="convention" && (client.rotationLimit||0)>0;
+  const usedConvRotations       = isConvWithRotation
+    ? discharges.filter(d=>d.clientId===client.id&&d.payMethod==="rotation"&&tsMatchesPfx(d.ts,periodPrefix)&&d.status!=="cancelled").length
+    : 0;
+  const rotationConvPct         = isConvWithRotation ? Math.round((usedConvRotations/(client.rotationLimit||1))*100) : 0;
+  const wouldExceedConvRot      = isConvWithRotation && convSubMode==="rotation" && client.rotationLimit>0 && (usedConvRotations+1)>client.rotationLimit;
+  const effectiveWouldExceedW   = wouldExceedWeight && !(isConvWithRotation && convSubMode==="rotation");
+  // Already-at-limit checks: block immediately when client is selected, before weight is entered
+  const alreadyAtCreditLimit  = client?.creditEnabled && client.creditLimit>0 && client.consumed>=client.creditLimit;
+  const alreadyAtWeightLimit  = client && !client.creditEnabled && !isRotationClient && client.weightLimitYear>0 && usedThisYear>=client.weightLimitYear;
+  const alreadyAtConvRotLimit = isConvWithRotation && client.rotationLimit>0 && usedConvRotations>=client.rotationLimit;
+  const wouldExceed = wouldExceedCredit || effectiveWouldExceedW || wouldExceedRotations || wouldExceedConvRot
+    || alreadyAtCreditLimit || alreadyAtWeightLimit || alreadyAtConvRotLimit
+    || wouldExceedPrepaid || alreadyAtPrepaidLimit;
+  // Remaining amounts — drive partial-entry guidance in the form
+  const remainingWeight  = client && !client.creditEnabled && !isRotationClient && client.weightLimitYear>0
+    ? Math.max(0, client.weightLimitYear - usedThisYear) : null;
+  const remainingBalance = client?.creditEnabled && client.creditLimit>0
+    ? Math.max(0, client.creditLimit - client.consumed)
+    : isPrepaid && client?.creditLimit>0
+    ? Math.max(0, client.creditLimit - client.consumed) : null;
+  const remainingRotations    = isRotationClient && client.weightLimitYear>0 ? Math.max(0, client.weightLimitYear - usedRotations) : null;
+  const remainingConvRotations = isConvWithRotation && client.rotationLimit>0 ? Math.max(0, client.rotationLimit - usedConvRotations) : null;
+  const weightPct   = client && !client.creditEnabled && !isRotationClient && client.weightLimitYear>0 ? Math.round((usedThisYear/client.weightLimitYear)*100) : 0;
+  const rotationPct = isRotationClient && client.weightLimitYear>0 ? Math.round((usedRotations/client.weightLimitYear)*100) : 0;
+  const consentBlocked = !!client && !client.consentGiven;
+  const limitBlocked = !isAdmin && wouldExceed;
+  const isCollectRotation        = opType==="collect" && (collectMode==="rotation" || client?.collectBillingMode==="rotation");
+  const collectRotationPriceOk   = !isCollectRotation || (wt?.collectRotationPrice??0) > 0;
+  const wasteTypeAllowed = validWasteTypes.some(w => w.id === form.wasteType);
+  const canSubmit = opType==="collect"
+    ? isCollectRotation
+      ? (form.truck && form.clientId && form.wasteType && wasteTypeAllowed && collectRotationPriceOk)
+      : (form.truck && form.clientId && gross>tare && form.wasteType && wasteTypeAllowed)
+    : isRotationClient
+      ? (form.truck && form.clientId && form.wasteType && wasteTypeAllowed)
+      : (form.truck && form.clientId && gross>tare && form.wasteType && wasteTypeAllowed);
+
+  // Collect-mode pricing
+  const collectUnitPrice     = isCollectRotation ? (wt?.collectRotationPrice??0) : (wt?.collectPrice??0);
+  const collectTotal         = isCollectRotation ? (wt?.collectRotationPrice??0) : net*(wt?.collectPrice??0);
+
+  const finalise = method => {
+    const effectiveMethod = opType==="collect"
+      ? (collectMode==="rotation"?"rotation":collectMode==="prepaid"?"prepaid":collectMode==="cash"?"cash":"convention")
+      : method;
+    let unitPrice, finalTotal;
+    if (opType==="collect") {
+      unitPrice  = collectUnitPrice;
+      finalTotal = collectTotal;
+    } else if (effectiveMethod==="rotation") {
+      unitPrice  = wt?.rotationPrice ?? 0;
+      finalTotal = wt?.rotationPrice ?? 0;
+    } else {
+      unitPrice  = wt?.price ?? 0;
+      finalTotal = total;
+    }
+    const e = {
+      id:uid(), ts:nowIso(), siteId:form.siteId,
+      clientId:form.clientId, clientName:client?.name ?? form.clientId,
+      truck:form.truck.toUpperCase(), wasteType:form.wasteType, gross, tare, net,
+      unitPrice,
+      total: finalTotal,
+status:(wouldExceed && !(isPrepaid && (client.consumed + finalTotal) <= client.creditLimit))?"flagged":(effectiveMethod==="cash"||effectiveMethod==="tpe"||effectiveMethod==="prepaid")?"paid":"settled",      payMethod:effectiveMethod, opId:authUser.id,
+      opType:opType,
+    };
+    addDischarge(e);
+    setLastEntry(e);
+    setStep(3);
+    setPayModal(false);
+    setCashConf(false);
+  };
+
+  const reset = () => {
+    setForm({siteId:defaultSite, truck:"", clientId:"", wasteType:validWasteTypes[0]?.id||"", gross:"", tare:""});
+    setStep(1); setLastEntry(null); setHint(null); setMode("convention"); setConvSubMode("tonnage"); setOpType("treatment"); setCollectMode("tonnage");
+  };
+
+  const handleAddCashClient = () => {
+    if (!cashForm.name) return;
+    const nc = {
+      id:uidC(), name:cashForm.name, clientType:"cash", type:"daily", status:"approved",
+      creditLimit:0, consumed:0, phone:cashForm.phone, address:"", nif:cashForm.nif, rc:"", docs:[], note:"",
+    };
+    addClient(nc);
+    if (cashForm.truck) set("truck", cashForm.truck);
+    if (cashForm.tare)  set("tare",  cashForm.tare);
+    set("clientId", nc.id);
+    setNewCashModal(false);
+    setCashForm({name:"",nif:"",phone:"",truck:"",tare:""});
+  };
+
+  // Receipt screen
+  if (step===3&&lastEntry) {
+    const recSite = sites.find(s=>s.id===lastEntry.siteId);
+    return (
+      <div style={{maxWidth:460,margin:"0 auto"}}>
+        <div className="alrt ao mb4">
+          <span style={{fontSize:20}}>🟢</span>
+          <div><strong>{t("Barrière Ouverte — Déchargement autorisé","الحاجز مفتوح — التفريغ مأذون")}</strong><div className="mt1 tsm">{t("Reçu","إيصال")} #{lastEntry.id}</div></div>
+        </div>
+        <div className="rcpt-print-area">
+          <div className="rcpt">
+            <div className="rh">
+              <div style={{fontWeight:700,fontSize:13,display:"flex",alignItems:"center",gap:6}}><img src="/logo.png" alt="CETManager" style={{width:22,height:22,objectFit:"contain"}}/>{cof(company,'name')}</div>
+              <div className="tmu" style={{marginTop:3,fontSize:11}}>{recSite?.name} — {recSite?.region}</div>
+              <div className="tmu" style={{fontSize:10}}>{fmtTs(lastEntry.ts)} · #{lastEntry.id}</div>
+            </div>
+            {[[t("Client","العميل"),lastEntry.clientName],
+              ...(clients.find(c=>c.id===lastEntry.clientId)?.nif ? [["N° CIN/NIF",clients.find(c=>c.id===lastEntry.clientId).nif]] : []),
+              [t("Camion","الشاحنة"),lastEntry.truck],
+              [t("Type déchets","نوع النفايات"),wasteTypes.find(w=>w.id===lastEntry.wasteType)?.label],
+              [t("Poids brut","الوزن الإجمالي"),fmtN(lastEntry.gross)+" t"],[t("Tare","التار"),fmtN(lastEntry.tare)+" t"],
+              [t("Poids net","الوزن الصافي"),fmtN(lastEntry.net)+" t"],
+              ...(lastEntry.payMethod!=="rotation"?[[t("Tarif","التعريفة"),fmt(lastEntry.unitPrice)+"/t"]]:[]),
+            ].map(([l,v])=><div key={l} className="rr"><span>{l}</span><span>{v}</span></div>)}
+            {lastEntry.payMethod==="rotation"
+              ?<div className="rrttl" style={{color:"var(--orange)"}}><span>{t("ROTATIONS","الدورات")}</span><span>+1 {t("rotation","دورة")}</span></div>
+              :<div className="rrttl"><span>{t("TOTAL","المجموع")}</span><span>{fmt(lastEntry.total)}</span></div>}
+            <div style={{textAlign:"center",marginTop:12,color:"var(--muted)",fontSize:10}}>
+              {lastEntry.payMethod==="cash"?t("💵 Payé en espèces","💵 مدفوع نقداً"):lastEntry.payMethod==="tpe"?t("💳 Payé par TPE","💳 مدفوع بـTPE"):lastEntry.payMethod==="rotation"?t("🔄 Convention Rotation","🔄 اتفاقية دوراني"):t("📋 Crédit compte mensuel","📋 ائتمان حساب شهري")}<br/>
+              {cof(company,'wilaya')}
+            </div>
+          </div>
+          <div className="rcpt-actions fx g3 mt4">
+            <button className="btn bg" style={{flex:1}} onClick={()=>alert(t("📱 SMS/WhatsApp envoyé (simulation)","📱 تم إرسال الرسالة (محاكاة)"))}>{t("📤 Envoyer SMS","📤 إرسال SMS")}</button>
+            <button className="btn bi" style={{flex:1}} onClick={()=>window.print()}>{t("🖨 Imprimer","🖨 طباعة")}</button>
+            <button className="btn bp" style={{flex:1}} onClick={reset}>{t("➕ Nouveau Dépôt","➕ إيداع جديد")}</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{maxWidth:700,margin:"0 auto"}}>
+      {/* Steps */}
+      <div className="fx aic g3 mb4" style={{fontSize:12,fontFamily:"var(--mono)"}}>
+        {[t("1 · Identification","1 · التعريف"),t("2 · Pesée","2 · الوزن"),t("3 · Validation","3 · التأكيد")].map((s,i)=>(
+          <div key={i} className="fx aic g3">
+            {i>0&&<span style={{color:"var(--dim)"}}>——</span>}
+            <span style={{color:step===i+1?"var(--g)":step>i+1?"var(--g2)":"var(--muted)",fontWeight:step===i+1?700:400}}>
+              {step>i+1?"✓ ":""}{s}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {/* Operation type toggle — always visible */}
+      <div className="gate-mode">
+        <div style={{fontFamily:"var(--mono)",fontSize:9,color:"var(--muted)",marginBottom:8,textTransform:"uppercase",letterSpacing:".12em"}}>{t("Type d'opération","نوع العملية")}</div>
+        <div className="seg">
+          <button className={`seg-btn${opType==="treatment"?" active":""}`}
+            onClick={()=>{setOpType("treatment");set("clientId","");setHint(null);}}>
+            🏭 Traitement
+          </button>
+          <button className={`seg-btn${opType==="collect"?" active":""}`}
+            onClick={()=>{setOpType("collect");set("clientId","");setHint(null);set("truck","");setCollectMode("tonnage");}}
+            style={opType==="collect"?{background:"var(--purple)",borderColor:"var(--purple)",color:"#fff"}:{}}>
+            🚛 Collecte et Traitement
+          </button>
+        </div>
+      </div>
+
+      {/* Mode toggle (treatment only) */}
+      {opType==="treatment"&&(
+      <div className="gate-mode">
+        <div style={{fontFamily:"var(--mono)",fontSize:9,color:"var(--muted)",marginBottom:8,textTransform:"uppercase",letterSpacing:".12em"}}>{t("Type de client","نوع العميل")}</div>
+        <div className="seg">
+          <button className={`seg-btn${mode==="convention"?" active":""}`} onClick={()=>{setMode("convention");set("clientId","");setHint(null);}}>
+            📋 Convention Tonnes
+          </button>
+          {approvedRotation.length>0&&(
+            <button className={`seg-btn${mode==="rotation"?" active":""}`} onClick={()=>{setMode("rotation");set("clientId","");setHint(null);}}>
+              🔄 Convention Rotation
+            </button>
+          )}
+          {approvedPrepaid.length>0&&(
+            <button className={`seg-btn${mode==="prepaid"?" active":""}`} onClick={()=>{setMode("prepaid");set("clientId","");setHint(null);}}>
+              🎫 Bonus Prépayé
+            </button>
+          )}
+          <button className={`seg-btn${mode==="cash"?" active":""}`} onClick={()=>{setMode("cash");set("clientId","");setHint(null);}}>
+            💵 Cash
+          </button>
+        </div>
+      </div>
+      )}
+
+      {/* Sub-type toggle (collect mode only) */}
+      {opType==="collect"&&(
+      <div className="gate-mode">
+        <div style={{fontFamily:"var(--mono)",fontSize:9,color:"var(--muted)",marginBottom:8,textTransform:"uppercase",letterSpacing:".12em"}}>{t("Type de facturation","نوع الفوترة")}</div>
+        <div className="seg">
+          <button className={`seg-btn${collectMode==="tonnage"?" active":""}`}
+            onClick={()=>{setCollectMode("tonnage");set("clientId","");}}
+            style={collectMode==="tonnage"?{background:"var(--purple)",borderColor:"var(--purple)",color:"#fff"}:{}}>
+            📋 Convention Tonnes
+          </button>
+          {collectRotationClients.length>0&&(
+            <button className={`seg-btn${collectMode==="rotation"?" active":""}`}
+              onClick={()=>{setCollectMode("rotation");set("clientId","");}}
+              style={collectMode==="rotation"?{background:"var(--orange)",borderColor:"var(--orange)",color:"#fff"}:{}}>
+              🔄 Rotations
+            </button>
+          )}
+          {collectPrepaidClients.length>0&&(
+            <button className={`seg-btn${collectMode==="prepaid"?" active":""}`}
+              onClick={()=>{setCollectMode("prepaid");set("clientId","");}}
+              style={collectMode==="prepaid"?{background:"var(--g)",borderColor:"var(--g)",color:"#fff"}:{}}>
+              🎫 Bonus Prépayé
+            </button>
+          )}
+          <button className={`seg-btn${collectMode==="cash"?" active":""}`}
+            onClick={()=>{setCollectMode("cash");set("clientId","");}}
+            style={collectMode==="cash"?{background:"var(--err)",borderColor:"var(--err)",color:"#fff"}:{}}>
+            💵 Cash
+          </button>
+        </div>
+      </div>
+      )}
+
+      <div className="panel">
+        <div className="ph">
+          <span className="pt">{opType==="collect"?"🚛 Collecte et Traitement":"🏭 Formulaire de Traitement"}</span>
+          <span className="chip chip-dim">{site?.name}</span>
+        </div>
+        <div style={{padding:20,display:"flex",flexDirection:"column",gap:16}}>
+          {/* Auto-correct siteId if client has assigned sites and current site is not in the list */}
+          {client?.assignedSites?.length>0&&!client.assignedSites.includes(form.siteId)&&(()=>{setTimeout(()=>set("siteId",client.assignedSites[0]),0);return null;})()}
+          <div className="fg fg2">
+            <div className="field"><label>Site CET</label>
+              {(()=>{
+                const assigned = client?.assignedSites?.length>0
+                  ? sites.filter(s=>client.assignedSites.includes(s.id)&&s.status==="active")
+                  : null;
+                // Single assigned site — locked display
+                if (!isAdmin && assigned && assigned.length===1) {
+                  return (
+                    <div className="fi" style={{display:"flex",alignItems:"center",gap:8,background:"var(--s2)",cursor:"not-allowed",userSelect:"none"}}>
+                      <span>📍</span>
+                      <span style={{fontWeight:600,flex:1}}>{assigned[0].name}</span>
+                      <span className="badge b-info" style={{fontSize:9}}>{assigned[0].type}</span>
+                      <span className="mn tmu" style={{fontSize:9,marginLeft:4}}>Fixé par admin</span>
+                    </div>
+                  );
+                }
+                // Multiple assigned sites — dropdown restricted to those sites
+                const options = assigned || sites;
+                return (
+                  <select className="fi" value={form.siteId} onChange={e=>set("siteId",e.target.value)}
+                    disabled={!isAdmin&&!assigned&&authUser.siteId!=="all"}>
+                    {options.map(s=>(
+                      <option key={s.id} value={s.id}>{s.name} ({s.type}) — {s.region}</option>
+                    ))}
+                  </select>
+                );
+              })()}
+            </div>
+            <div className="field"><label>Horodatage (auto)</label>
+              <input className="fi" readOnly value={new Date().toLocaleString("fr-DZ")}/>
+            </div>
+          </div>
+
+          <hr className="dvdr" style={{margin:"2px 0"}}/>
+
+          <div className="fg fg2">
+            <div className="field">
+              {opType==="collect"?(
+                <>
+                  <label>Camion CETManager</label>
+                  <select className="fi" value={form.truck} onChange={e=>set("truck",e.target.value)}>
+                    <option value="">-- Sélectionner un camion --</option>
+                    {activeCompanyTrucks.map(t=>(
+                      <option key={t.id} value={t.plate}>{t.plate}{t.label?` — ${t.label}`:""}{t.tare?` (tare: ${t.tare}t)`:""}</option>
+                    ))}
+                  </select>
+                  {activeCompanyTrucks.length===0&&(
+                    <div className="alrt ae" style={{marginTop:4,padding:"4px 8px",fontSize:10}}>
+                      <span>⚠</span><span>Aucun camion actif — ajoutez des camions dans Paramètres → Flotte</span>
+                    </div>
+                  )}
+                </>
+              ):(
+                <>
+                  <label>N° Plaque / Scan QR 📷</label>
+                  <input className="fi" placeholder="ex: 18-TRK-001" value={form.truck} onChange={e=>onTruck(e.target.value)}/>
+                </>
+              )}
+            </div>
+            <div className="field">
+              {opType==="collect"?(
+                <>
+                  <label>
+                    {collectMode==="rotation"?"Client Collecte — Rotation":collectMode==="prepaid"?"Client Collecte — Prépayé":collectMode==="cash"?"Client Collecte — Cash":"Client Collecte — Convention Tonnes"}
+                    {collectMode==="cash"&&(
+                      <span style={{marginLeft:8,cursor:"pointer",color:"var(--g)",fontSize:9}} onClick={()=>setNewCashModal(true)}>
+                        + Nouveau client cash
+                      </span>
+                    )}
+                  </label>
+                  {(() => {
+                    const selTruck = activeCompanyTrucks.find(t=>t.plate===form.truck);
+                    if (selTruck && selTruck.tare && !form.tare) { setTimeout(()=>set("tare",String(selTruck.tare)),0); }
+                    return null;
+                  })()}
+                  <select className="fi" value={form.clientId} onChange={e=>set("clientId",e.target.value)}>
+                    <option value="">-- Sélectionner --</option>
+                    {(collectMode==="rotation"?collectRotationClients:collectMode==="prepaid"?collectPrepaidClients:collectMode==="cash"?collectCashClients:collectTonnageClients).map(c=>(
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                  {(collectMode==="rotation"?collectRotationClients:collectMode==="prepaid"?collectPrepaidClients:collectMode==="cash"?collectCashClients:collectTonnageClients).length===0&&(
+                    <div className="alrt ai" style={{marginTop:4,padding:"4px 8px",fontSize:10}}>
+                      <span>ℹ️</span>
+                      <span>
+                        {collectMode==="rotation"?"Aucun client Rotation pour ce site":collectMode==="prepaid"?"Aucun client Prépayé pour ce site":collectMode==="cash"?"Aucun client Cash pour ce site":"Aucun client Collecte et Traitement pour ce site"}
+                      </span>
+                    </div>
+                  )}
+                </>
+              ):(
+                <>
+                  <label>
+                    {mode==="convention"?"Client Convention Tonnes":mode==="rotation"?"Client Convention Rotation":mode==="credit"?"Client Crédit":"Client Cash"}
+                    {mode==="cash"&&(
+                      <span style={{marginLeft:8,cursor:"pointer",color:"var(--g)",fontSize:9}} onClick={()=>setNewCashModal(true)}>
+                        + Nouveau client cash
+                      </span>
+                    )}
+                  </label>
+                  <select className="fi" value={form.clientId} onChange={e=>set("clientId",e.target.value)}>
+                    <option value="">-- Sélectionner --</option>
+                    {(mode==="convention"?approvedConvention:mode==="rotation"?approvedRotation:mode==="credit"?approvedCredit:mode==="prepaid"?approvedPrepaid:approvedCash).map(c=>(
+                      <option key={c.id} value={c.id}>{c.name}{(mode==="convention"||mode==="rotation"||mode==="credit")?` [${c.clientType==="state"?"État":"Privé"}]`:""}</option>
+                    ))}
+                  </select>
+                </>
+              )}
+            </div>
+          </div>
+          {/* Collect mode: billing info badge */}
+          {opType==="collect"&&(
+            <div className="alrt ai" style={{padding:"6px 12px"}}>
+              <span>{collectMode==="rotation"?"🔄":collectMode==="prepaid"?"🎫":collectMode==="cash"?"💵":"📋"}</span>
+              <span style={{fontSize:11}}>
+                Mode de facturation : <strong>
+                  {collectMode==="rotation"?"Par rotation — prix fixe par passage":
+                   collectMode==="prepaid"?"Bonus prépayé — déduction du solde":
+                   collectMode==="cash"?"Cash — paiement immédiat":
+                   "Convention tonnage — facturation au poids"}
+                </strong>
+              </span>
+            </div>
+          )}
+
+          {hint&&(
+            <div className="alrt ao" style={{marginBottom:0}}>
+              <span>✅</span>
+              <div><strong>Camion identifié :</strong> {hint.c?.name} · Tare: <strong>{hint.t.tare} t</strong> · Types autorisés: <strong>{hint.t.allowed.join(", ")}</strong></div>
+            </div>
+          )}
+          {client&&(
+            opType==="collect"?(
+              <div className={`alrt ${collectMode==="cash"?"aw":wouldExceed?"ae":"ao"}`} style={{marginBottom:0}}>
+                <span>{isCollectRotation?"🔄":collectMode==="cash"?"💵":collectMode==="prepaid"?"🎫":"📋"}</span>
+                <div style={{flex:1}}>
+                  {collectMode==="cash"
+                    ?<><strong>Client Cash (Collecte) :</strong> Paiement en espèces requis à la livraison.</>
+                    :isCollectRotation
+                    ?<><strong>Client Collecte — Rotation :</strong> 1 rotation enregistrée par passage. Aucun pesage requis.</>
+                    :collectMode==="prepaid"
+                    ?<><strong>Client Prépayé (Collecte) :</strong> Décharge imputée au solde prépayé.
+                      <span style={{marginLeft:8,fontFamily:"var(--mono)",fontSize:11}}>
+                        {fmt(client.consumed)} / {fmt(client.creditLimit)} DA
+                      </span>
+                      {wouldExceedCredit&&<div style={{color:"var(--err)",fontSize:11,marginTop:3}}>⚠ Solde prépayé insuffisant !</div>}
+                    </>
+                    :<><strong>Client Collecte — Tonnage ({client.payFrequency==="monthly"?"/mois":"/an"}) :</strong> Facturation au poids net.
+                      {client.weightLimitYear>0&&(
+                        <div style={{marginTop:4}}>
+                          <div className="cbt" style={{height:4,marginBottom:3}}>
+                            <div className="cbf" style={{width:`${Math.min(weightPct,100)}%`,background:wouldExceedWeight?"var(--err)":weightPct>80?"var(--warn)":"var(--purple)"}}/>
+                          </div>
+                          <span style={{fontFamily:"var(--mono)",fontSize:11}}>
+                            {fmtN(usedThisYear)} / {fmtN(client.weightLimitYear)} t — {weightPct}% utilisé
+                          </span>
+                          {wouldExceedWeight&&<span style={{color:"var(--err)",marginLeft:8,fontSize:11}}>⚠ Quota dépassé !</span>}
+                        </div>
+                      )}
+                    </>}
+                </div>
+              </div>
+            ):(
+              <div className={`alrt ${mode==="cash"?"aw":wouldExceed?"ae":"ao"}`} style={{marginBottom:0}}>
+                <span>{mode==="cash"?"💵":mode==="prepaid"?"🎫":mode==="rotation"?"🔄":client.creditEnabled?"💳":isConvWithRotation&&convSubMode==="rotation"?"🔄":"📋"}</span>
+                <div style={{flex:1}}>
+                  {mode==="cash"
+                    ?<><strong>Client Cash :</strong> Paiement en espèces requis. La barrière restera fermée jusqu'à confirmation.</>
+                    :mode==="prepaid"
+                    ?<><strong>Client Bonus Prépayé :</strong> Solde consommé à chaque décharge.
+                      <span style={{marginLeft:8,fontFamily:"var(--mono)",fontSize:11}}>
+                        {fmt(client.consumed)} / {fmt(client.creditLimit)} DA
+                      </span>
+                      {(()=>{
+                        const pp = creditPct(client);
+                        const rem = Math.max(0, client.creditLimit - client.consumed);
+                        if (wouldExceedCredit || pp>=100) return <div style={{color:"var(--err)",fontSize:11,marginTop:3,fontWeight:700}}>🔴 Solde épuisé — décharge impossible !</div>;
+                        if (pp>=90) return <div style={{color:"var(--err)",fontSize:11,marginTop:3,fontWeight:700}}>🔴 Solde critique : {fmt(rem)} DA restants ({100-pp}%)</div>;
+                        if (pp>=70) return <div style={{color:"var(--warn)",fontSize:11,marginTop:3,fontWeight:600}}>🟠 Solde bas : {fmt(rem)} DA restants ({100-pp}%)</div>;
+                        return null;
+                      })()}
+                    </>
+                    :mode==="rotation"
+                    ?<><strong>Client Convention Rotation ({client.payFrequency==="monthly"?"mensuelle":"annuelle"}) :</strong> Chaque décharge = 1 rotation.
+                      {client.weightLimitYear>0&&(
+                        <div style={{marginTop:4}}>
+                          <div className="cbt" style={{height:4,marginBottom:3}}>
+                            <div className="cbf" style={{width:`${Math.min(rotationPct,100)}%`,background:wouldExceedRotations?"var(--err)":rotationPct>80?"var(--warn)":"var(--g)"}}/>
+                          </div>
+                          <span style={{fontFamily:"var(--mono)",fontSize:11}}>
+                            {usedRotations} / {client.weightLimitYear} rotations — {rotationPct}% utilisé
+                          </span>
+                          {wouldExceedRotations&&<span style={{color:"var(--err)",marginLeft:8,fontSize:11}}>⚠ Quota de rotations dépassé !</span>}
+                        </div>
+                      )}
+                    </>
+                    :client.creditEnabled
+                    ?<><strong>Client Crédit (DA) :</strong> Décharge imputée au compte crédit.
+                      <span style={{marginLeft:8,fontFamily:"var(--mono)",fontSize:11}}>
+                        {fmt(client.consumed)} / {fmt(client.creditLimit)} DA
+                      </span>
+                      {wouldExceedCredit&&<div style={{color:"var(--err)",fontSize:11,marginTop:3}}>⚠ Limite de crédit dépassée ({creditPct(client)}% utilisé) !</div>}
+                    </>
+                    :<><strong>Client Convention Tonnes{isConvWithRotation&&convSubMode==="rotation"?" — Mode Rotation":""} ({client.payFrequency==="monthly"?"/mois":"/an"}) :</strong>{" "}
+                      {isConvWithRotation&&convSubMode==="rotation"?"Chaque décharge = 1 rotation sur le quota autorisé.":"Décharge créditée au quota de tonnage."}
+                      {isConvWithRotation&&convSubMode==="rotation"?(
+                        <div style={{marginTop:4}}>
+                          <div className="cbt" style={{height:4,marginBottom:3}}>
+                            <div className="cbf" style={{width:`${Math.min(rotationConvPct,100)}%`,background:wouldExceedConvRot?"var(--err)":rotationConvPct>80?"var(--warn)":"var(--orange)"}}/>
+                          </div>
+                          <span style={{fontFamily:"var(--mono)",fontSize:11}}>
+                            {usedConvRotations} / {client.rotationLimit} rotations — {rotationConvPct}% utilisé
+                          </span>
+                          {wouldExceedConvRot&&<span style={{color:"var(--err)",marginLeft:8,fontSize:11}}>⚠ Quota de rotations dépassé !</span>}
+                        </div>
+                      ):client.weightLimitYear>0&&(
+                        <div style={{marginTop:4}}>
+                          <div className="cbt" style={{height:4,marginBottom:3}}>
+                            <div className="cbf" style={{width:`${Math.min(weightPct,100)}%`,background:wouldExceedWeight?"var(--err)":weightPct>80?"var(--warn)":"var(--g)"}}/>
+                          </div>
+                          <span style={{fontFamily:"var(--mono)",fontSize:11}}>
+                            {fmtN(usedThisYear)} / {fmtN(client.weightLimitYear)} t — {weightPct}% utilisé
+                          </span>
+                          {wouldExceedWeight&&<span style={{color:"var(--err)",marginLeft:8,fontSize:11}}>⚠ Quota dépassé !</span>}
+                        </div>
+                      )}
+                    </>}
+                </div>
+              </div>
+            )
+          )}
+
+          {/* Billing sub-mode toggle for convention clients with a rotation quota */}
+          {isConvWithRotation&&(
+            <div className="field" style={{marginTop:2}}>
+              <label style={{fontSize:11,fontFamily:"var(--mono)",color:"var(--muted)",textTransform:"uppercase",letterSpacing:".08em"}}>Mode de facturation pour cette décharge</label>
+              <div className="seg" style={{marginTop:6}}>
+                <button className={`seg-btn${convSubMode==="tonnage"?" active":""}`}
+                  onClick={()=>setConvSubMode("tonnage")}>
+                  ⚖️ Tonnage
+                </button>
+                <button className={`seg-btn${convSubMode==="rotation"?" active":""}`}
+                  onClick={()=>setConvSubMode("rotation")}
+                  style={convSubMode==="rotation"?{background:"var(--orange)",borderColor:"var(--orange)",color:"#fff"}:{}}>
+                  🔄 Rotation ({usedConvRotations}/{client?.rotationLimit||0})
+                </button>
+              </div>
+            </div>
+          )}
+
+          <hr className="dvdr" style={{margin:"2px 0"}}/>
+
+          {(isRotationClient && opType !== "collect") ? (
+            <div className="alrt ao" style={{marginBottom:0,padding:"10px 14px"}}>
+              <span style={{fontSize:16}}>🔄</span>
+              <div style={{flex:1}}>
+                <strong>Client Convention Rotation — saisie de tonnage non applicable</strong>
+                <div style={{fontSize:11,marginTop:2,color:"var(--muted)"}}>Ce client est facturé à la rotation. Chaque décharge enregistre <strong>1 rotation</strong>, indépendamment du poids. Les champs poids brut / tare / net ne sont pas requis.</div>
+                {remainingRotations!==null&&(
+                  <div style={{marginTop:6,display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
+                    <span style={{fontSize:12,fontWeight:600,color:remainingRotations===0?"var(--err)":remainingRotations<=Math.ceil(client.weightLimitYear*0.15)?"var(--warn)":"var(--g)"}}>
+                      Rotations restantes : {remainingRotations} / {client.weightLimitYear}
+                    </span>
+                    {remainingRotations===0&&<span style={{fontSize:11,color:"var(--err)"}}>— quota épuisé</span>}
+                    {remainingRotations>0&&remainingRotations<=Math.ceil(client.weightLimitYear*0.15)&&<span style={{fontSize:11,color:"var(--warn)"}}>— quasi-épuisé</span>}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : isCollectRotation ? (
+            <div className="alrt ao" style={{marginBottom:0,padding:"10px 14px"}}>
+              <span style={{fontSize:16}}>🚛</span>
+              <div style={{flex:1}}>
+                <strong>Collecte — Facturation à la rotation</strong>
+                <div style={{fontSize:11,marginTop:2,color:"var(--muted)"}}>Ce client est facturé au <strong>passage fixe</strong>. Chaque collecte enregistre <strong>1 rotation</strong> au tarif configuré. Aucun pesage requis.</div>
+                {remainingBalance!==null&&(
+                  <div style={{marginTop:6,fontSize:12,fontWeight:600,color:remainingBalance===0?"var(--err)":remainingBalance<=(client.creditLimit*0.1)?"var(--warn)":"var(--g)"}}>
+                    Solde restant : {fmt(remainingBalance)} DA
+                    {remainingBalance===0&&<span style={{fontWeight:400,marginLeft:6,color:"var(--err)"}}>— solde épuisé</span>}
+                    {remainingBalance>0&&remainingBalance<=(client.creditLimit*0.1)&&<span style={{fontWeight:400,marginLeft:6,color:"var(--warn)"}}>— quasi-épuisé</span>}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="fg fg3">
+              <div className="field"><label>Poids Brut (tonnes)</label>
+                <input className="fi" type="number" step="0.1" min="0" placeholder="0.0" value={form.gross} onChange={e=>set("gross",e.target.value)}/>
+              </div>
+              <div className="field"><label>Tare (tonnes)</label>
+                <input className="fi" type="number" step="0.1" min="0" placeholder="0.0" value={form.tare} onChange={e=>set("tare",e.target.value)}/>
+              </div>
+              <div className="field"><label>Poids Net = Brut − Tare</label>
+                <div className="wb"><span className="wv">{fmtN(net)}</span><span className="wu">tonnes</span></div>
+              </div>
+              {remainingWeight!==null&&(
+                <div className="field">
+                  <label style={{color:net>remainingWeight||remainingWeight===0?"var(--err)":remainingWeight<=(client.weightLimitYear*0.15)?"var(--warn)":"var(--muted)"}}>
+                    Quota restant
+                  </label>
+                  <div className="wb">
+                    <span className="wv" style={{color:net>remainingWeight||remainingWeight===0?"var(--err)":remainingWeight<=(client.weightLimitYear*0.15)?"var(--warn)":"inherit"}}>
+                      {fmtN(remainingWeight)}
+                    </span>
+                    <span className="wu">t max</span>
+                  </div>
+                  {net>remainingWeight&&net>0&&<div style={{color:"var(--err)",fontSize:10,marginTop:2}}>
+                    ⚠ Dépasse de {fmtN(net-remainingWeight)} t — max autorisé : {fmtN(remainingWeight)} t net
+                  </div>}
+                </div>
+              )}
+              {remainingConvRotations!==null&&convSubMode==="rotation"&&(
+                <div className="field">
+                  <label style={{color:remainingConvRotations===0?"var(--err)":remainingConvRotations<=Math.ceil(client.rotationLimit*0.15)?"var(--warn)":"var(--muted)"}}>
+                    Rotations restantes
+                  </label>
+                  <div className="wb">
+                    <span className="wv" style={{color:remainingConvRotations===0?"var(--err)":remainingConvRotations<=Math.ceil(client.rotationLimit*0.15)?"var(--warn)":"inherit"}}>
+                      {remainingConvRotations}
+                    </span>
+                    <span className="wu">/ {client.rotationLimit}</span>
+                  </div>
+                  {remainingConvRotations===0&&<div style={{color:"var(--err)",fontSize:10,marginTop:2}}>
+                    ⚠ Quota de rotations épuisé
+                  </div>}
+                </div>
+              )}
+            </div>
+          )}
+          {remainingBalance!==null&&net>0&&!isCollectRotation&&(
+            <div style={{fontSize:11,padding:"4px 10px",marginTop:-4,color:effectiveTotalForLimit>remainingBalance?"var(--err)":remainingBalance<=(client.creditLimit*0.1)?"var(--warn)":"var(--muted)"}}>
+              Solde restant : <strong>{fmt(remainingBalance)} DA</strong>
+              {effectiveTotalForLimit>remainingBalance&&<span style={{color:"var(--err)",marginLeft:6}}>— montant requis {fmt(effectiveTotalForLimit)} DA dépasse le solde</span>}
+            </div>
+          )}
+
+          <div className="field">
+            <label>Type de Déchets
+              {clientAllowedWaste&&clientAllowedWaste.length>0&&(
+                <span style={{marginLeft:6,fontSize:10,background:"var(--orange)",color:"#fff",borderRadius:4,padding:"1px 5px"}}>
+                  Restreint par contrat
+                </span>
+              )}
+            </label>
+            <select className="fi" value={form.wasteType} onChange={e=>set("wasteType",e.target.value)}>
+              {validWasteTypes.map(w=>{
+                const isRotMode = mode==="rotation"||(isConvWithRotation&&convSubMode==="rotation");
+                const tarif = opType==="collect"
+                  ? (isCollectRotation?(w.collectRotationPrice??0):(w.collectPrice??0))
+                  : isRotMode ? (w.rotationPrice??0) : w.price;
+                const unit = (opType==="collect"&&isCollectRotation)||isRotMode ? "/rot." : "/t";
+                return <option key={w.id} value={w.id}>{w.label} — {fmt(tarif)}{unit}</option>;
+              })}
+            </select>
+            {validWasteTypes.length===0&&form.clientId&&(
+              <span style={{color:"var(--err)",fontSize:11}}>⚠ Aucun type de déchet autorisé pour ce client — vérifiez son contrat.</span>
+            )}
+          </div>
+
+          {opType==="collect"?(
+            (form.clientId&&form.truck)&&(
+              <div className="cost-box" style={{borderColor:"var(--purple)"}}>
+                <div className="cl">
+                  <span className="clb">Mode</span>
+                  <span className="clv" style={{color:"var(--purple)",fontWeight:700}}>
+                    {isCollectRotation?"🔄 Collecte — Rotation":"⚖️ Collecte — Tonnage"}
+                  </span>
+                </div>
+                {isCollectRotation?(
+                  <>
+                    {(wt?.collectRotationPrice??0)===0?(
+                      <div className="alrt ae" style={{padding:"6px 10px",marginTop:4}}>
+                        <span>⚠️</span>
+                        <span style={{fontSize:11}}>
+                          <strong>Prix de rotation non configuré</strong> pour ce type de déchet ({wt?.label||"—"}).<br/>
+                          Allez dans <em>Paramètres → Types de déchets</em> et renseignez le champ <strong>Collecte / Rotation (DA/rot.)</strong>.
+                        </span>
+                      </div>
+                    ):(
+                      <div className="cl ct" style={{borderColor:"var(--purple)"}}>
+                        <span style={{fontSize:13,fontWeight:700,color:"var(--purple)"}}>Prix fixe par passage</span>
+                        <span className="ctv" style={{color:"var(--purple)",fontFamily:"var(--mono)"}}>{fmt(wt?.collectRotationPrice??0)}</span>
+                      </div>
+                    )}
+                  </>
+                ):(
+                  net>0&&(
+                    <>
+                      <div className="cl"><span className="clb">Poids net</span><span className="clv">{fmtN(net)} t</span></div>
+                      <div className="cl">
+                        <span className="clb">Tarif collecte ({wt?.label})</span>
+                        <span className="clv" style={{color:"var(--err)",fontWeight:700}}>{fmt(wt?.collectPrice??0)} <span style={{fontSize:10,fontWeight:400}}>DA/t × {fmtN(net)} t</span></span>
+                      </div>
+                      <div className="cl ct" style={{borderColor:"var(--purple)"}}>
+                        <span style={{fontSize:13,fontWeight:700,color:"var(--purple)"}}>Coût Collecte</span>
+                        <span className="ctv" style={{color:"var(--purple)"}}>{fmt(collectTotal)}</span>
+                      </div>
+                      <div style={{fontSize:10,color:"var(--muted)",padding:"0 4px",marginTop:2}}>
+                        ℹ️ Mode tonnage — facturation au poids. Pour un tarif fixe par passage, configurez le client en mode <strong>Rotation</strong>.
+                      </div>
+                    </>
+                  )
+                )}
+              </div>
+            )
+          ):mode==="rotation"?(
+            form.clientId&&wt&&(
+              <div className="cost-box" style={{borderColor:"var(--orange)"}}>
+                <div className="cl"><span className="clb">Type de déchets</span><span className="clv">{wt.label}</span></div>
+                <div className="cl"><span className="clb">Tarif rotation (admin)</span><span className="clv" style={{fontFamily:"var(--mono)",color:"var(--orange)"}}>{fmt(wt.rotationPrice??0)} / rot.</span></div>
+                <div className="cl ct" style={{borderColor:"var(--orange)"}}>
+                  <span style={{fontSize:13,fontWeight:700,color:"var(--orange)"}}>Montant facturé</span>
+                  <span className="ctv" style={{color:"var(--orange)",fontFamily:"var(--mono)"}}>{fmt(wt.rotationPrice??0)}</span>
+                </div>
+                {client&&client.weightLimitYear>0&&(
+                  <div className="cl" style={{marginTop:6}}>
+                    <span className="clb">Après cette rotation</span>
+                    <span className="clv" style={{color:wouldExceedRotations?"var(--err)":"var(--g)",fontFamily:"var(--mono)"}}>
+                      {usedRotations+1} / {client.weightLimitYear} rotations
+                    </span>
+                  </div>
+                )}
+              </div>
+            )
+          ):(isConvWithRotation&&convSubMode==="rotation")?(
+            net>0&&wt&&(
+              <div className="cost-box" style={{borderColor:"var(--orange)"}}>
+                <div className="cl"><span className="clb">Poids enregistré</span><span className="clv">{fmtN(net)} t</span></div>
+                <div className="cl"><span className="clb">Tarif rotation (admin)</span><span className="clv" style={{fontFamily:"var(--mono)",color:"var(--orange)"}}>{fmt(wt.rotationPrice??0)} / rot.</span></div>
+                <div className="cl ct" style={{borderColor:"var(--orange)"}}>
+                  <span style={{fontSize:13,fontWeight:700,color:"var(--orange)"}}>Montant facturé</span>
+                  <span className="ctv" style={{color:"var(--orange)",fontFamily:"var(--mono)"}}>{fmt(wt.rotationPrice??0)}</span>
+                </div>
+                {client&&client.rotationLimit>0&&(
+                  <div className="cl" style={{marginTop:6}}>
+                    <span className="clb">Après cette rotation</span>
+                    <span className="clv" style={{color:wouldExceedConvRot?"var(--err)":"var(--g)",fontFamily:"var(--mono)"}}>
+                      {usedConvRotations+1} / {client.rotationLimit} rotations
+                    </span>
+                  </div>
+                )}
+              </div>
+            )
+          ):(
+            net>0&&wt&&(
+              <div className="cost-box">
+                <div className="cl"><span className="clb">Poids net facturé</span><span className="clv">{fmtN(net)} t</span></div>
+                <div className="cl"><span className="clb">Tarif ({wt.label})</span><span className="clv">{fmt(wt.price)} / t</span></div>
+                <div className="cl ct">
+                  <span style={{fontSize:13,fontWeight:700}}>Coût Total</span>
+                  <span className="ctv">{fmt(total)}</span>
+                </div>
+                {isOnAccount&&client&&(
+                  <div className="cl" style={{marginTop:6}}>
+                    <span className="clb">Solde après décharge</span>
+                    <span className="clv" style={{color:wouldExceed?"var(--err)":"var(--g)"}}>
+                      {fmt(client.consumed+total)} / {fmt(client.creditLimit)}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )
+          )}
+
+          {consentBlocked&&(
+            <div className="alrt ae" style={{marginBottom:0}}>
+              <span>🔒</span>
+              <div>
+                <strong>DOSSIER BLOQUÉ — Consentement Loi 18-07 manquant.</strong>{" "}
+                Ce client n'a pas encore consenti au traitement de ses données personnelles. L'administrateur doit enregistrer son consentement dans la fiche client avant toute opération.
+              </div>
+            </div>
+          )}
+
+          {limitBlocked&&(
+            <div className="alrt ae" style={{marginBottom:0}}>
+              <span>🚫</span>
+              <div>
+                <strong>ENTRÉE BLOQUÉE —</strong>{" "}
+                {alreadyAtCreditLimit||alreadyAtPrepaidLimit
+                  ? "Le solde de ce client est épuisé (0 DA restant). Contactez l'administrateur."
+                  : alreadyAtWeightLimit
+                  ? "Le quota de tonnage de ce client est épuisé (0 t restant). Contactez l'administrateur."
+                  : alreadyAtConvRotLimit
+                  ? "Le quota de rotations convention de ce client est épuisé. Contactez l'administrateur."
+                  : wouldExceedRotations
+                  ? "Le quota de rotations de ce client est atteint. Contactez l'administrateur."
+                  : (wouldExceedCredit||wouldExceedPrepaid)&&remainingBalance!==null
+                  ? `Solde insuffisant — il reste ${fmt(remainingBalance)} DA, mais ce décharge requiert ${fmt(effectiveTotalForLimit)} DA.`
+                  : remainingWeight!==null
+                  ? `Quota dépassé — il reste ${fmtN(remainingWeight)} t, mais le poids net actuel est ${fmtN(net)} t.`
+                  : "La limite de ce client est atteinte. Contactez l'administrateur."}
+              </div>
+            </div>
+          )}
+          <button className="btn bp bfw"
+            style={{fontSize:15,padding:12,opacity:(limitBlocked||consentBlocked)?.45:1,cursor:(limitBlocked||consentBlocked)?"not-allowed":"pointer",
+              ...(opType==="collect"
+                ? collectMode==="rotation"?{background:"var(--orange)",borderColor:"var(--orange)"}
+                  :collectMode==="prepaid"?{background:"var(--g)",borderColor:"var(--g)"}
+                  :collectMode==="cash"?{background:"var(--err)",borderColor:"var(--err)"}
+                  :{background:"var(--purple)",borderColor:"var(--purple)"}
+                : isConvWithRotation&&convSubMode==="rotation"?{background:"var(--orange)",borderColor:"var(--orange)"}:{})}}
+            disabled={!canSubmit||limitBlocked||consentBlocked}
+            onClick={()=>{
+              if (opType==="collect") {
+                if (collectMode==="cash") { setPayModal(true); return; }
+                finalise(""); return;
+              }
+              if (mode==="cash") { setPayModal(true); return; }
+              finalise(isConvWithRotation&&convSubMode==="rotation"?"rotation":mode);
+            }}>
+            {consentBlocked?"🔒 Dossier bloqué — Consentement requis"
+              :limitBlocked?"🚫 Entrée bloquée — Limite atteinte"
+              :opType==="collect"?(
+                collectMode==="rotation"?"🔄 Enregistrer Collecte (Rotation) & Ouvrir Barrière →"
+                :collectMode==="prepaid"?"🎫 Consommer Bonus Collecte & Ouvrir Barrière →"
+                :collectMode==="cash"?"💵 Procéder au Paiement Cash (Collecte) →"
+                :"📋 Enregistrer Collecte (Tonnage) & Ouvrir Barrière →"
+              )
+              :mode==="cash"?"💵 Procéder au Paiement Cash →"
+              :mode==="prepaid"?"🎫 Consommer Bonus & Ouvrir Barrière →"
+              :mode==="rotation"?"🔄 Enregistrer Rotation & Ouvrir Barrière →"
+              :isConvWithRotation&&convSubMode==="rotation"?"🔄 Enregistrer Rotation (Convention) & Ouvrir Barrière →"
+              :"📋 Enregistrer Convention & Ouvrir Barrière →"}
+          </button>
+        </div>
+      </div>
+
+      {/* Cash Payment Modal */}
+      {payModal&&(
+        <div className="ov">
+          <div className="modal">
+            <div className="mh">
+              <span className="mh-title">{selPayMethod==="tpe"?"💳 Paiement TPE Requis":"💵 Paiement Cash Requis"}</span>
+              <button className="btn bg bsm" onClick={()=>{setPayModal(false);setCashConf(false);}}>✕</button>
+            </div>
+            <div className="mb2">
+              <div className="alrt ae mb4"><span>🚧</span><strong>BARRIÈRE FERMÉE — En attente de paiement</strong></div>
+              <div className="cost-box mb4">
+                <div className="cl"><span className="clb">Client</span><span className="clv mn">{client?.name}</span></div>
+                <div className="cl"><span className="clb">Camion</span><span className="clv mn">{form.truck}</span></div>
+                <div className="cl"><span className="clb">Calcul</span><span className="clv">{fmtN(net)} t × {fmt(wt?.price||0)}</span></div>
+                <div className="cl ct"><span style={{fontWeight:700}}>MONTANT DÛ</span><span className="ctv">{fmt(total)}</span></div>
+              </div>
+              <div className="card mb3" style={{display:"flex",flexDirection:"column",gap:10}}>
+                <div style={{fontWeight:700,marginBottom:4,fontSize:12,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".08em",fontFamily:"var(--mono)"}}>Mode de règlement</div>
+                <label className="fx aic g2" style={{cursor:"pointer",padding:"10px 12px",borderRadius:8,border:`2px solid ${selPayMethod==="cash"?"var(--g)":"var(--bdr)"}`,background:selPayMethod==="cash"?"rgba(46,201,92,.06)":"none",transition:"all .15s"}}>
+                  <input type="radio" name="pm" value="cash" checked={selPayMethod==="cash"} onChange={()=>{setSelPayMethod("cash");setCashConf(false);}} style={{accentColor:"var(--g)"}}/>
+                  <span style={{marginLeft:8,fontWeight:600}}>💵 Espèces</span>
+                  <span style={{marginLeft:"auto",fontSize:11,color:"var(--muted)"}}>Paiement en numéraire</span>
+                </label>
+                <label className="fx aic g2" style={{cursor:"pointer",padding:"10px 12px",borderRadius:8,border:`2px solid ${selPayMethod==="tpe"?"var(--indigo)":"var(--bdr)"}`,background:selPayMethod==="tpe"?"rgba(99,102,241,.06)":"none",transition:"all .15s"}}>
+                  <input type="radio" name="pm" value="tpe" checked={selPayMethod==="tpe"} onChange={()=>{setSelPayMethod("tpe");setCashConf(false);}} style={{accentColor:"var(--indigo)"}}/>
+                  <span style={{marginLeft:8,fontWeight:600}}>💳 TPE — Carte Bancaire</span>
+                  <span style={{marginLeft:"auto",fontSize:11,color:"var(--muted)"}}>Terminal de paiement</span>
+                </label>
+              </div>
+              <label style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",
+                background:selPayMethod==="tpe"?"rgba(99,102,241,.06)":"rgba(46,201,92,.08)",
+                border:`1px solid ${selPayMethod==="tpe"?"rgba(99,102,241,.25)":"rgba(46,201,92,.2)"}`,
+                borderRadius:8,padding:"12px 14px",transition:"all .2s"}}>
+                <input type="checkbox" checked={cashConf} onChange={e=>setCashConf(e.target.checked)}
+                  style={{accentColor:selPayMethod==="tpe"?"var(--indigo)":"var(--g)"}}/>
+                <span style={{fontWeight:600}}>
+                  {selPayMethod==="tpe"?"✅ Confirmer la transaction TPE validée sur le terminal":"✅ Confirmer la réception du montant en espèces"}
+                </span>
+              </label>
+            </div>
+            <div className="mf">
+              <button className="btn bg" onClick={()=>{setPayModal(false);setCashConf(false);}}>Annuler</button>
+              <button className="btn bp" disabled={!cashConf}
+                style={selPayMethod==="tpe"?{background:"var(--indigo)",borderColor:"var(--indigo)"}:{}}
+                onClick={()=>finalise(selPayMethod)}>
+                🟢 Valider & Ouvrir Barrière
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* New Cash Client Modal */}
+      {newCashModal&&(
+        <div className="ov">
+          <div className="modal">
+            <div className="mh">
+              <span className="mh-title">➕ Nouveau Client Cash</span>
+              <button className="btn bg bsm" onClick={()=>setNewCashModal(false)}>✕</button>
+            </div>
+            <div className="mb2">
+              <div className="alrt ai mb3" style={{marginBottom:16}}>
+                <span>ℹ️</span>
+                <span style={{fontSize:11}}>Enregistrement rapide d'un client payant en espèces. Ce client sera disponible pour les futures saisies.</span>
+              </div>
+              <div className="fg" style={{gap:12}}>
+                <div className="field"><label>Nom complet / Raison sociale *</label>
+                  <input className="fi" placeholder="Nom du client ou entreprise" value={cashForm.name} onChange={e=>setCashForm(f=>({...f,name:e.target.value}))}/>
+                </div>
+                <div className="fg fg2">
+                  <div className="field"><label>N° CIN / NIF *</label>
+                    <input className="fi" placeholder="ex: 18-123456789" value={cashForm.nif} onChange={e=>setCashForm(f=>({...f,nif:e.target.value}))}/>
+                  </div>
+                  <div className="field"><label>Téléphone</label>
+                    <input className="fi" placeholder="000 00 00 00" value={cashForm.phone} onChange={e=>setCashForm(f=>({...f,phone:e.target.value}))}/>
+                  </div>
+                </div>
+                <div className="fg fg2">
+                  <div className="field"><label>N° Plaque (optionnel)</label>
+                    <input className="fi" placeholder="18-XXX-000" value={cashForm.truck} onChange={e=>setCashForm(f=>({...f,truck:e.target.value}))}/>
+                  </div>
+                  <div className="field"><label>Tare (t, optionnel)</label>
+                    <input className="fi" type="number" step="0.1" placeholder="0.0" value={cashForm.tare} onChange={e=>setCashForm(f=>({...f,tare:e.target.value}))}/>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="mf">
+              <button className="btn bg" onClick={()=>setNewCashModal(false)}>Annuler</button>
+              <button className="btn bp" disabled={!cashForm.name||!cashForm.nif} onClick={handleAddCashClient}>
+                ✓ Enregistrer le client
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DISCHARGES HISTORY
+═══════════════════════════════════════════════════════════════════════════ */
+function PageDischarges({discharges,setDischarges,sites,wasteTypes,users,clients,invoices,updateClient,updateDischarge,isAdmin,authUser,company}) {
+  const t = useT();
+  const opSiteId = (!isAdmin && authUser?.siteId && authUser.siteId!=="all") ? authUser.siteId : null;
+  const [filter,  setFilter]  = useState("all");
+  const [search,  setSearch]  = useState("");
+  const [siteF,   setSiteF]   = useState(opSiteId||"all");
+  const [dateFrom,setDateFrom] = useState("");
+  const [dateTo,  setDateTo]   = useState("");
+  const [clientF, setClientF] = useState("all");
+  const [wasteF,  setWasteF]  = useState("all");
+  const [opTypeF, setOpTypeF] = useState("all");
+  const [modeF,   setModeF]   = useState("all");
+  const [statusF, setStatusF] = useState("all");
+  const [truckF,  setTruckF]  = useState("all");
+  const [selD,    setSelD]     = useState(null); // selected flagged discharge
+  const [action,  setAction]  = useState("extend"); // "extend" | "settle"
+  const [newLimit,setNewLimit] = useState("");
+  const [resolveNote, setResolveNote] = useState("");
+  // Edit discharge state (admin only)
+  const [editD,   setEditD]   = useState(null);
+  const [printD,  setPrintD]  = useState(null);
+  const openEdit = d => setEditD({...d});
+  const setE = (k,v) => setEditD(f=>({...f,[k]:v}));
+
+  const exportCSV = () => {
+    const headers = ["ID","Date/Heure","Site","Camion","Client","Type déchets","Poids brut (t)","Tare (t)","Poids net (t)","Tarif (DA/t)","Total (DA)","Mode paiement","Statut","Opérateur"];
+    const esc = v => `"${String(v??'').replace(/"/g,'""')}"`;
+    const rows = filtered.map(d=>[
+      d.id,
+      fmtTs(d.ts),
+      sites.find(s=>s.id===d.siteId)?.name||d.siteId,
+      d.truck,
+      d.clientName,
+      wasteTypes.find(w=>w.id===d.wasteType)?.label||d.wasteType,
+      d.gross.toFixed(3),
+      d.tare.toFixed(3),
+      d.net.toFixed(3),
+      d.unitPrice.toFixed(2),
+      d.total.toFixed(2),
+      d.payMethod==="cash"?"Espèces":d.payMethod==="tpe"?"TPE":d.payMethod==="convention"?"Convention":d.payMethod==="prepaid"?"Prépayé":d.payMethod,
+      d.status==="ok"?"OK":d.status==="paid"?"Payé":d.status==="settled"?"Réglé":d.status==="flagged"?"Alerte":d.status==="cancelled"?"Annulé":d.status,
+      users.find(u=>u.id===d.opId)?.name||d.opId||"",
+    ].map(esc).join(","));
+    const csv = "\uFEFF" + [headers.map(esc).join(","), ...rows].join("\r\n");
+    const blob = new Blob([csv], {type:"text/csv;charset=utf-8;"});
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    const dateStr = new Date().toISOString().slice(0,10);
+    a.href = url; a.download = `CETManager-dechargements-${dateStr}.csv`;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a); URL.revokeObjectURL(url);
+  };
+  const doEdit = async () => {
+    const gross = parseFloat(editD.gross)||0;
+    const tare  = parseFloat(editD.tare)||0;
+    const net   = Math.max(0, gross-tare);
+    const wt    = wasteTypes.find(w=>w.id===editD.wasteType);
+    const total = net * (wt?.price||0);
+    const updated = {...editD, gross, tare, net, total, unitPrice:wt?.price||0};
+    await updateDischarge(updated);
+    setEditD(null);
+  };
+
+  const filtered = discharges.filter(d=>{
+    const mf  = filter==="all"||d.status===filter||d.payMethod===filter;
+    const ms  = !search||d.truck.includes(search.toUpperCase())||d.clientName.toLowerCase().includes(search.toLowerCase());
+    const msf = opSiteId ? d.siteId===opSiteId : (siteF==="all"||d.siteId===siteF);
+    const dts = d.ts.slice(0,10);
+    const mdf = (!dateFrom || dts >= dateFrom) && (!dateTo || dts <= dateTo);
+    const mcl = clientF==="all"||d.clientId===clientF;
+    const mwt = wasteF==="all"||d.wasteType===wasteF;
+    const mot = opTypeF==="all"||d.opType===opTypeF;
+    const mmd = modeF==="all"||d.payMethod===modeF;
+    const mst = statusF==="all"||d.status===statusF;
+    const mtr = truckF==="all"||d.truck===truckF;
+    return mf&&ms&&msf&&mdf&&mcl&&mwt&&mot&&mmd&&mst&&mtr;
+  });
+  const totalFiltered = filtered.reduce((s,d)=>s+d.total,0);
+  const tonsFiltered  = filtered.filter(d=>d.payMethod!=="rotation").reduce((s,d)=>s+d.net,0);
+  const flaggedCount  = discharges.filter(d=>d.status==="flagged").length;
+
+  const openResolve = d => {
+    const c = clients.find(c=>c.id===d.clientId);
+    setSelD({...d, client:c});
+    setNewLimit(String(c?.creditLimit||0));
+    setResolveNote("");
+    // Phase 2b: extend-limit is no longer a discharge-resolution action
+    setAction("extend");
+  };
+
+  const handleResolve = async () => {
+    if (!selD) return;
+    // Phase 0 fix: always send statusOnly:true so the backend never overwrites discharge data
+    await apiFetch(`/api/discharges/${selD.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:"settled",statusOnly:true})});
+    setDischarges(p=>p.map(d=>d.id===selD.id?{...d,status:"settled"}:d));
+    setSelD(null);
+  };
+
+  return (
+    <>
+      <div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap",alignItems:"flex-end"}}>
+        <input className="fi" style={{width:200}} placeholder={t("🔍 Camion ou client...","🔍 شاحنة أو عميل...")} value={search} onChange={e=>setSearch(e.target.value)}/>
+        {opSiteId ? (
+          <span className="badge b-info" style={{padding:"6px 12px",fontSize:11}}>
+            🏭 {sites.find(s=>s.id===opSiteId)?.name||opSiteId}
+          </span>
+        ) : (
+          <select className="fi" style={{width:160}} value={siteF} onChange={e=>setSiteF(e.target.value)}>
+            <option value="all">{t("Tous les sites","كل المواقع")}</option>
+            {sites.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        )}
+        {/* Date range */}
+        <div className="field" style={{margin:0}}>
+          <label style={{fontFamily:"var(--mono)",fontSize:8,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".12em"}}>{t("Du","من")}</label>
+          <input className="fi" type="date" style={{width:140}} value={dateFrom} onChange={e=>setDateFrom(e.target.value)}/>
+        </div>
+        <div className="field" style={{margin:0}}>
+          <label style={{fontFamily:"var(--mono)",fontSize:8,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".12em"}}>{t("Au","إلى")}</label>
+          <input className="fi" type="date" style={{width:140}} value={dateTo} onChange={e=>setDateTo(e.target.value)}/>
+        </div>
+        {(dateFrom||dateTo)&&(
+          <button className="btn bg bsm" style={{alignSelf:"flex-end"}} onClick={()=>{setDateFrom("");setDateTo("");}}>✕ Reset</button>
+        )}
+        <div className="fx aic g2" style={{alignSelf:"flex-end"}}>
+          {[["all",t("Tous","الكل")],["cash","💵 Cash"],["convention","📋 Convention"],["flagged",`⚠ ${t("Alertes","تنبيهات")}${flaggedCount>0?` (${flaggedCount})`:""}`]].map(([f,l])=>(
+            <button key={f} className={`btn bsm ${filter===f?f==="flagged"?"bw":"bp":"bg"}`} onClick={()=>setFilter(f)}>{l}</button>
+          ))}
+        </div>
+        <div style={{marginLeft:"auto",display:"flex",alignItems:"flex-end",gap:10}}>
+          <div style={{textAlign:"right"}}>
+            <div className="mn tsm tg">{fmt(totalFiltered)}</div>
+            <div className="tsm tmu">{filtered.length} {t("entrées","سجل")} · {fmtN(tonsFiltered)} t</div>
+          </div>
+          <button className="btn bg bsm" onClick={exportCSV} disabled={filtered.length===0}
+            title="Exporter en CSV (Excel)" style={{whiteSpace:"nowrap"}}>
+            📥 Exporter CSV
+          </button>
+        </div>
+      </div>
+
+      {/* ── Second filter row ── */}
+      <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap",alignItems:"center"}}>
+        <select className="fi" style={{width:180}} value={clientF} onChange={e=>setClientF(e.target.value)}>
+          <option value="all">{t("👤 Tous les clients","👤 كل العملاء")}</option>
+          {[...new Map(discharges.map(d=>[d.clientId,d.clientName])).entries()]
+            .sort((a,b)=>a[1].localeCompare(b[1]))
+            .map(([id,name])=><option key={id} value={id}>{name}</option>)}
+        </select>
+        <select className="fi" style={{width:175}} value={wasteF} onChange={e=>setWasteF(e.target.value)}>
+          <option value="all">{t("♻️ Type de déchet","♻️ نوع النفايات")}</option>
+          {wasteTypes.map(w=><option key={w.id} value={w.id}>{w.label}</option>)}
+        </select>
+        <select className="fi" style={{width:160}} value={opTypeF} onChange={e=>setOpTypeF(e.target.value)}>
+          <option value="all">{t("⚙️ Opération","⚙️ العملية")}</option>
+          <option value="treatment">{t("Traitement","معالجة")}</option>
+          <option value="rotation">{t("Rotation","دوراني")}</option>
+          <option value="collect">{t("Collecte","جمع")}</option>
+        </select>
+        <select className="fi" style={{width:155}} value={modeF} onChange={e=>setModeF(e.target.value)}>
+          <option value="all">{t("💳 Mode paiement","💳 طريقة الدفع")}</option>
+          <option value="cash">{t("Espèces","نقد")}</option>
+          <option value="tpe">TPE — {t("Carte","بطاقة")}</option>
+          <option value="convention">{t("Convention","اتفاقية")}</option>
+          <option value="credit">{t("Crédit","ائتمان")}</option>
+          <option value="prepaid">{t("Prépayé","مدفوع مسبقاً")}</option>
+          <option value="rotation">{t("Rotation","دوراني")}</option>
+        </select>
+        <select className="fi" style={{width:140}} value={statusF} onChange={e=>setStatusF(e.target.value)}>
+          <option value="all">{t("📋 Statut","📋 الحالة")}</option>
+          <option value="ok">OK</option>
+          <option value="paid">{t("Payé","مدفوع")}</option>
+          <option value="settled">{t("Réglé","مُسوَّى")}</option>
+          <option value="flagged">{t("⚠ Alerte","⚠ تنبيه")}</option>
+          <option value="cancelled">{t("Annulé","ملغى")}</option>
+        </select>
+        <select className="fi" style={{width:145}} value={truckF} onChange={e=>setTruckF(e.target.value)}>
+          <option value="all">{t("🚛 Camion","🚛 الشاحنة")}</option>
+          {[...new Set(discharges.map(d=>d.truck).filter(Boolean))].sort()
+            .map(t=><option key={t} value={t}>{t}</option>)}
+        </select>
+        {(clientF!=="all"||wasteF!=="all"||opTypeF!=="all"||modeF!=="all"||statusF!=="all"||truckF!=="all")&&(
+          <button className="btn bg bsm" onClick={()=>{setClientF("all");setWasteF("all");setOpTypeF("all");setModeF("all");setStatusF("all");setTruckF("all");}}>
+            ✕ Reset filtres
+          </button>
+        )}
+      </div>
+
+      {flaggedCount>0&&filter!=="flagged"&&(
+        <div className="alrt ae mb4" style={{cursor:"pointer"}} onClick={()=>setFilter("flagged")}>
+          <span style={{fontSize:18}}>🚨</span>
+          <div>
+            <strong>{flaggedCount} {t("déchargement(s) nécessitent une régularisation de crédit","تفريغ(ات) تتطلب تسوية ائتمانية")}</strong>
+            <div className="mt1" style={{fontSize:11}}>{t("Cliquez pour afficher · Bouton \"Régulariser\" disponible sur chaque ligne","اضغط للعرض · زر «تسوية» متاح في كل سطر")}</div>
+          </div>
+        </div>
+      )}
+
+      <div className="panel">
+        <div className="tw">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th><th>{t("Date/Heure","التاريخ/الوقت")}</th><th>{t("Site","الموقع")}</th><th>{t("Camion","الشاحنة")}</th><th>{t("Client","العميل")}</th>
+                <th>{t("Type","النوع")}</th><th>{t("Opération","العملية")}</th><th>{t("Net(t)","الصافي(ط)")}</th><th>{t("Tarif","التعريفة")}</th><th>{t("Total HT","المجموع")}</th><th>{t("Net à payer","الصافي للدفع")}</th><th>{t("Mode","الوضع")}</th><th>{t("Statut","الحالة")}</th><th>{t("Op.","المشغل")}</th><th>{t("Action","الإجراء")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.length===0?(
+                <tr>
+                  <td colSpan={15} style={{textAlign:"center",padding:40}}>
+                    <div style={{fontSize:32,marginBottom:8}}>📭</div>
+                    <div style={{color:"var(--muted)"}}>Aucune entrée</div>
+                    <div style={{color:"var(--dim)",fontSize:11,marginTop:4}}>Les déchargements enregistrés apparaîtront ici</div>
+                  </td>
+                </tr>
+              ):filtered.map(d=>{
+                const wt = wasteTypes.find(w=>w.id===d.wasteType);
+                const op = users.find(u=>u.id===d.opId);
+                const cl = clients.find(c=>c.id===d.clientId);
+                const TVAr = cl?.vatSubject ? 0.19 : 0;
+                const netAPayer = Math.round(d.total * (1 + TVAr) * 100) / 100;
+                const isFlagged = d.status==="flagged";
+                return (
+                  <tr key={d.id} className={isFlagged?"flagged-row":""}>
+                    <td><span className="mn tmu">{d.id}</span></td>
+                    <td><span className="mn">{fmtTs(d.ts)}</span></td>
+                    <td><span className="badge b-info">{d.siteId}</span></td>
+                    <td><span className="mn">{d.truck}</span></td>
+                    <td style={{maxWidth:140}} className="truncate">
+                      {isFlagged&&<span style={{color:"var(--err)",marginRight:5}}>⚠</span>}
+                      {d.clientName}
+                    </td>
+                    <td><span className="badge b-purple">{wt?.label.split(" ")[0]}</span></td>
+                    <td>{d.opType==="collect"
+                      ?<span className="badge" style={{background:"rgba(139,92,246,.12)",color:"var(--purple)",border:"1px solid rgba(139,92,246,.3)",fontSize:9,whiteSpace:"nowrap"}}>{t("🚛 Collecte","🚛 جمع")}</span>
+                      :<span className="badge" style={{background:"rgba(46,201,92,.1)",color:"var(--g)",border:"1px solid rgba(46,201,92,.3)",fontSize:9,whiteSpace:"nowrap"}}>{t("🏭 Traitement","🏭 معالجة")}</span>
+                    }</td>
+                    <td><span className="mn">{fmtN(d.net)}</span></td>
+                    <td><span className="mn tmu">{fmt(d.unitPrice)}{d.payMethod==="rotation"?<span style={{fontSize:9,marginLeft:2}}>/rot.</span>:<span style={{fontSize:9,marginLeft:2}}>/t</span>}</span></td>
+                    <td><span className="mn tg fw7">{fmt(d.total)}</span></td>
+                    <td>
+                      <span className="mn fw7" style={{color:"var(--purple)"}}>
+                        {fmt(netAPayer)}
+                        {TVAr>0&&<span style={{fontSize:9,marginLeft:3,color:"var(--muted)",fontWeight:400}}>TTC</span>}
+                      </span>
+                    </td>
+                    <td>{
+                      d.payMethod==="cash"?<span className="badge b-cash">💵 Cash</span>
+                      :d.payMethod==="tpe"?<span className="badge b-indigo">💳 TPE</span>
+                      :d.payMethod==="rotation"?<span className="badge" style={{background:"rgba(251,146,60,.12)",color:"var(--orange)",border:"1px solid rgba(251,146,60,.3)"}}>🔄 Rotation</span>
+                      :<span className="badge b-info">📋 Conv.</span>
+                    }</td>
+                    <td><StatusBadge s={d.status}/></td>
+                    <td><span className="mn tmu" style={{fontSize:10}}>{op?.name.split(" ")[0]||"—"}</span></td>
+                    <td>
+                      <div className="fx aic g2">
+                        {isFlagged&&(
+                          <button className="btn bw bsm" onClick={()=>openResolve(d)}
+                            style={{fontSize:10,padding:"4px 10px"}}>
+                            ⚡ Régul.
+                          </button>
+                        )}
+                        {isAdmin&&(
+                          <button className="btn bg bsm" onClick={()=>openEdit(d)}
+                            style={{fontSize:10,padding:"4px 10px"}}>
+                            ✏️ Corriger
+                          </button>
+                        )}
+                        <button className="btn bg bsm" onClick={()=>setPrintD(d)}
+                          title="Imprimer le ticket" style={{fontSize:11,padding:"4px 8px"}}>
+                          🖨️
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Resolve flagged modal */}
+      {selD&&(
+        <div className="ov">
+          <div className="modal">
+            <div className="mh">
+              <span className="mh-title">⚡ Régularisation — Dépassement crédit</span>
+              <button className="btn bg bsm" onClick={()=>setSelD(null)}>✕</button>
+            </div>
+            <div className="mb2">
+              <div className="alrt ae mb3" style={{marginBottom:16}}>
+                <span>⚠</span>
+                <div>
+                  <strong>Dépassement détecté pour {selD.clientName}</strong>
+                  <div style={{marginTop:4,fontSize:11}}>
+                    Décharge #{selD.id} · {fmt(selD.total)} · {fmtTs(selD.ts)}
+                  </div>
+                </div>
+              </div>
+
+              {selD.client&&(
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:18}}>
+                  {[
+                    ["Limite actuelle", fmt(selD.client.creditLimit), "var(--muted)"],
+                    ["Montant consommé", fmt(selD.client.consumed), "var(--err)"],
+                    ["Dépassement",     fmt(Math.max(0,selD.client.consumed-selD.client.creditLimit)), "var(--err)"],
+                  ].map(([l,v,col])=>(
+                    <div key={l} className="card-sm" style={{textAlign:"center",borderTop:`2px solid ${col}`}}>
+                      <div style={{fontSize:9,fontFamily:"var(--mono)",color:"var(--muted)",textTransform:"uppercase",letterSpacing:".1em",marginBottom:4}}>{l}</div>
+                      <div style={{fontFamily:"var(--head)",fontSize:15,fontWeight:800,color:col}}>{v}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Phase 2b: extend-limit is a separate admin action, not a discharge resolution.
+                  Resolution is done here as an admin exception; real settlement goes through billing. */}
+              <div className="alrt ao" style={{marginBottom:16}}>
+                <span>✅</span>
+                <div>
+                  <strong>Marquer comme réglé — exception admin</strong>
+                  <div style={{marginTop:4,fontSize:11,lineHeight:1.5}}>
+                    Cette décharge sera marquée <em>Réglé</em> à titre exceptionnel (accord donné hors système).
+                    Pour un règlement financier traçable, générez une facture depuis l'onglet <strong>Facturation</strong>
+                    {" "}et enregistrez le paiement du client.
+                  </div>
+                </div>
+              </div>
+              <div style={{fontSize:11,color:"var(--muted)",marginBottom:14}}>
+                Pour augmenter la limite de crédit du client, utilisez la fiche client dans l'onglet <strong>Clients</strong>.
+              </div>
+
+              <div className="field mt3" style={{marginTop:14}}>
+                <label>Note de régularisation (optionnel)</label>
+                <textarea className="fi" value={resolveNote} onChange={e=>setResolveNote(e.target.value)}
+                  placeholder="Ex: Accord du directeur du 14/07/2025, extension exceptionnelle..."/>
+              </div>
+            </div>
+            <div className="mf">
+              <button className="btn bg" onClick={()=>setSelD(null)}>Annuler</button>
+              <button className="btn bp" onClick={handleResolve}>
+                ✓ Confirmer la régularisation
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Print discharge ticket modal */}
+      {printD&&(
+        <div className="ov" onClick={()=>setPrintD(null)}>
+          <div onClick={e=>e.stopPropagation()} style={{maxWidth:400,width:"100%"}}>
+            <div className="rcpt-print-area">
+              <div className="rcpt">
+                <div className="rh">
+                  <div style={{fontWeight:700,fontSize:14,display:"flex",alignItems:"center",gap:6}}><img src="/logo.png" alt="CETManager" style={{width:24,height:24,objectFit:"contain"}}/>{cof(company,'short')}</div>
+                  <div className="tmu" style={{marginTop:3,fontSize:11,lineHeight:1.5}}>
+                    {sites.find(s=>s.id===printD.siteId)?.name} — {sites.find(s=>s.id===printD.siteId)?.region}
+                  </div>
+                  <div className="tmu" style={{fontSize:10,marginTop:2}}>{fmtTs(printD.ts)} · #{printD.id}</div>
+                </div>
+                {[
+                  ["Client",         printD.clientName],
+                  ...(clients.find(c=>c.id===printD.clientId)?.nif
+                    ? [["N° NIF", clients.find(c=>c.id===printD.clientId).nif]] : []),
+                  ["Camion",         printD.truck],
+                  ["Type déchets",   wasteTypes.find(w=>w.id===printD.wasteType)?.label||printD.wasteType],
+                  ["Poids brut",     fmtN(printD.gross)+" t"],
+                  ["Tare",           fmtN(printD.tare)+" t"],
+                  ["Poids net",      fmtN(printD.net)+" t"],
+                  ["Tarif unitaire", fmt(printD.unitPrice)+"/t"],
+                  ["Mode paiement",  printD.payMethod==="cash"?"Espèces":printD.payMethod==="tpe"?"TPE — Carte Bancaire":printD.payMethod==="convention"?"Convention mensuelle":printD.payMethod==="prepaid"?"Prépayé":"Convention"],
+                  ["Opérateur",      users.find(u=>u.id===printD.opId)?.name||printD.opId||"—"],
+                ].map(([l,v])=>(
+                  <div key={l} className="rr"><span>{l}</span><span style={{fontWeight:600}}>{v}</span></div>
+                ))}
+                <div className="rrttl"><span>TOTAL</span><span>{fmt(printD.total)}</span></div>
+                <div style={{textAlign:"center",marginTop:14,fontSize:10,color:"var(--muted)",lineHeight:1.7}}>
+                  <StatusBadge s={printD.status}/><br/>
+                  {cof(company,'name')}<br/>
+                  {cof(company,'address')}<br/>
+                  Tél : {cof(company,'phone')}
+                </div>
+              </div>
+              <div className="rcpt-actions fx g3 mt4">
+                <button className="btn bg" style={{flex:1}} onClick={()=>setPrintD(null)}>✕ Fermer</button>
+                <button className="btn bi" style={{flex:1}} onClick={()=>window.print()}>🖨️ Imprimer / PDF</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit discharge modal (admin only) */}
+      {editD&&(
+        <div className="ov">
+          <div className="modal modal-lg">
+            <div className="mh">
+              <span className="mh-title">✏️ Correction — Déchargement #{editD.id}</span>
+              <button className="btn bg bsm" onClick={()=>setEditD(null)}>✕</button>
+            </div>
+            <div className="mb2">
+              <div className="alrt ai mb3" style={{marginBottom:16}}>
+                <span>ℹ️</span><span style={{fontSize:11}}>Correction administrative uniquement. Toute modification recalcule automatiquement le net et le montant.</span>
+              </div>
+              <div className="fg" style={{gap:14}}>
+                <div className="fg fg2">
+                  <div className="field"><label>Date / Heure</label>
+                    <input className="fi" type="datetime-local" value={editD.ts} onChange={e=>setE("ts",e.target.value)}/>
+                  </div>
+                  <div className="field"><label>Site</label>
+                    <select className="fi" value={editD.siteId} onChange={e=>setE("siteId",e.target.value)}>
+                      {sites.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <div className="fg fg2">
+                  <div className="field"><label>N° Camion</label>
+                    <input className="fi" value={editD.truck} onChange={e=>setE("truck",e.target.value.toUpperCase())}/>
+                  </div>
+                  <div className="field"><label>Type de Déchets</label>
+                    <select className="fi" value={editD.wasteType} onChange={e=>setE("wasteType",e.target.value)}>
+                      {wasteTypes.map(w=><option key={w.id} value={w.id}>{w.label}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <div className="fg fg3">
+                  <div className="field"><label>Poids Brut (t)</label>
+                    <input className="fi" type="number" step="0.1" value={editD.gross} onChange={e=>setE("gross",e.target.value)}/>
+                  </div>
+                  <div className="field"><label>Tare (t)</label>
+                    <input className="fi" type="number" step="0.1" value={editD.tare} onChange={e=>setE("tare",e.target.value)}/>
+                  </div>
+                  <div className="field"><label>Net calculé (t)</label>
+                    <div className="fi" style={{background:"var(--s3)",cursor:"default",color:"var(--g)",fontWeight:700}}>
+                      {fmtN(Math.max(0,(parseFloat(editD.gross)||0)-(parseFloat(editD.tare)||0)))} t
+                    </div>
+                  </div>
+                </div>
+                <div className="fg fg2">
+                  <div className="field"><label>Mode de Paiement</label>
+                    <select className="fi" value={editD.payMethod} onChange={e=>setE("payMethod",e.target.value)}>
+                      <option value="convention">📋 Convention</option>
+                      <option value="credit">💳 Crédit</option>
+                      <option value="prepaid">🎫 Bonus Prépayé</option>
+                      <option value="cash">💵 Espèces</option>
+                      <option value="tpe">💳 TPE — Carte Bancaire</option>
+                    </select>
+                  </div>
+                  <div className="field"><label>Statut</label>
+                    <select className="fi" value={editD.status} onChange={e=>setE("status",e.target.value)}>
+                      <option value="settled">Réglé</option>
+                      <option value="paid">Payé</option>
+                      <option value="flagged">Flaggé</option>
+                      <option value="cancelled">Annulé</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="field"><label>Motif de la correction *</label>
+                  <textarea className="fi" value={editD.correctionReason||""} onChange={e=>setE("correctionReason",e.target.value)}
+                    placeholder="Ex: Erreur de saisie du poids brut, correction suite à re-pesée..." rows={2}/>
+                </div>
+              </div>
+            </div>
+            <div className="mf">
+              <button className="btn bg" onClick={()=>setEditD(null)}>Annuler</button>
+              <button className="btn bp" disabled={!editD.correctionReason} onClick={doEdit}>✓ Enregistrer la correction</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CLIENTS
+═══════════════════════════════════════════════════════════════════════════ */
+function PageClients({clients,discharges,updateClient,addClient,deleteClient,isAdmin,docTypes,sites,company,wasteTypes,authUser}) {
+  const t = useT();
+  const [tab,   setTab]   = useState("convention");
+  const [sel,   setSel]   = useState(null);
+  const [modal, setModal] = useState(false);
+  const [note,  setNote]  = useState("");
+  const [creditInput, setCreditInput] = useState("");
+  const [addForm, setAddForm] = useState({name:"",clientType:"private",phone:"",address:"",nif:"",rc:"",note:"",vatSubject:false,assignedSites:[]});
+  const [editClientForm, setEditClientForm] = useState(null);
+  const [prepaidForm, setPrepaidForm] = useState({name:"",phone:"",address:"",balance:"",note:"",vatSubject:false,assignedSites:[]});
+
+  const convClients     = clients.filter(c=>c.type==="convention");
+  const rotationClients = clients.filter(c=>c.type==="rotation");
+  const prepaidClients  = clients.filter(c=>c.type==="prepaid");
+  const cashClients     = clients.filter(c=>c.type==="daily");
+  const c = clients.find(c=>c.id===sel);
+  const cd = sel ? discharges.filter(d=>d.clientId===sel) : [];
+
+  // Per-discharge payment progress (Phase 3B.4) — fetched when client is selected
+  const [discPayments, setDiscPayments] = useState({});
+  const [expandedDisc, setExpandedDisc] = useState(null); // discharge id whose payment trail is open
+  useEffect(() => {
+    if (!sel) { setDiscPayments({}); setExpandedDisc(null); return; }
+    apiFetch(`/api/clients/${sel}/discharge-payments`)
+      .then(r => r.json())
+      .then(data => { if (data && typeof data === 'object' && !Array.isArray(data) && !data.error) setDiscPayments(data); })
+      .catch(() => {});
+  }, [sel]);
+
+  const [approveMode, setApproveMode] = useState("weight"); // "weight" | "credit" | "rotation"
+  const [weightInput, setWeightInput] = useState("");
+  const [rotationInput, setRotationInput] = useState("");
+  const [quotaPeriod, setQuotaPeriod] = useState("year"); // "year" | "month"
+  const [addRotForm, setAddRotForm] = useState({name:"",clientType:"private",phone:"",address:"",nif:"",rc:"",payFrequency:"monthly",note:"",vatSubject:false,assignedSites:[]});
+
+  const doApprove = () => {
+    const isCreditMode   = approveMode==="credit";
+    const isRotationMode = approveMode==="rotation";
+    updateClient({
+      ...c, status:"approved", note,
+      creditEnabled: isCreditMode,
+      creditLimit: isCreditMode ? (parseFloat(creditInput)||0) : 0,
+      weightLimitYear: isCreditMode ? 0 : isRotationMode ? (parseInt(rotationInput)||0) : (parseFloat(weightInput)||0),
+      payFrequency: isCreditMode ? (c.payFrequency||"monthly") : (quotaPeriod==="month" ? "monthly" : "annual"),
+    });
+    setModal(false); setNote(""); setCreditInput(""); setWeightInput(""); setRotationInput("");
+  };
+  const doReject = () => {
+    updateClient({...c, status:"rejected", note});
+    setModal(false); setNote("");
+  };
+  const doAddClient = () => {
+    if (!addForm.name) return;
+    const nc = {
+      id:uidC(), name:addForm.name, clientType:addForm.clientType, type:"convention",
+      status:"pending_docs", creditLimit:0, consumed:0,
+      payFrequency:addForm.payFrequency||"monthly", payInstrument:addForm.payInstrument||"cheque",
+      phone:addForm.phone, address:addForm.address, nif:addForm.nif, rc:addForm.rc,
+      docs:[], note:addForm.note, vatSubject:addForm.vatSubject||false,
+      assignedSites:addForm.assignedSites||[], allowedWasteTypes:addForm.allowedWasteTypes||[],
+    };
+    addClient(nc);
+    setModal(false);
+    setAddForm({name:"",clientType:"private",payFrequency:"monthly",payInstrument:"cheque",phone:"",address:"",nif:"",rc:"",note:"",vatSubject:false,assignedSites:[],allowedWasteTypes:[]});
+  };
+
+  const doAddRotationClient = () => {
+    if (!addRotForm.name) return;
+    const nc = {
+      id:uidC(), name:addRotForm.name, clientType:addRotForm.clientType, type:"rotation",
+      status:"pending_docs", creditLimit:0, consumed:0, weightLimitYear:0,
+      payFrequency:addRotForm.payFrequency||"monthly", payInstrument:"cheque",
+      phone:addRotForm.phone, address:addRotForm.address, nif:addRotForm.nif, rc:addRotForm.rc,
+      docs:[], note:addRotForm.note, vatSubject:addRotForm.vatSubject||false,
+      assignedSites:addRotForm.assignedSites||[], allowedWasteTypes:addRotForm.allowedWasteTypes||[],
+    };
+    addClient(nc);
+    setModal(false);
+    setAddRotForm({name:"",clientType:"private",phone:"",address:"",nif:"",rc:"",payFrequency:"monthly",note:"",vatSubject:false,assignedSites:[],allowedWasteTypes:[]});
+  };
+
+  const doPrepaidAdd = () => {
+    if (!prepaidForm.name) return;
+    const nc = {
+      id:uidC(), name:prepaidForm.name, clientType:"private", type:"prepaid", status:"approved",
+      creditLimit:parseFloat(prepaidForm.balance)||0, consumed:0,
+      phone:prepaidForm.phone, address:prepaidForm.address, nif:"", rc:"", docs:[], note:prepaidForm.note,
+      vatSubject:prepaidForm.vatSubject||false,
+      assignedSites:prepaidForm.assignedSites||[], allowedWasteTypes:prepaidForm.allowedWasteTypes||[],
+    };
+    addClient(nc);
+    setModal(false);
+    setPrepaidForm({name:"",phone:"",address:"",balance:"",note:"",vatSubject:false,assignedSites:[]});
+  };
+
+  const doEditClient = () => {
+    if (!editClientForm) return;
+    updateClient({...editClientForm});
+    setModal(false);
+    setEditClientForm(null);
+  };
+
+  const requiredDocs = c
+    ? (() => {
+        if (c.type==="prepaid") return docTypes?.prepaid||REQUIRED_DOCS_PREPAID;
+        const base = c.clientType==="state"
+          ? (docTypes?.state||REQUIRED_DOCS_STATE)
+          : (docTypes?.private||REQUIRED_DOCS_PRIVATE);
+        if (c.serviceType==="treat_and_collect"||c.serviceType==="both") {
+          const ex = docTypes?.collect||REQUIRED_DOCS_COLLECT;
+          return [...base, ...ex.filter(d=>!base.includes(d))];
+        }
+        return base;
+      })()
+    : [];
+
+  const toggleDoc = (doc) => {
+    if (!c) return;
+    const already = c.docs.includes(doc);
+    const newDocs = already ? c.docs.filter(d=>d!==doc) : [...c.docs, doc];
+    updateClient({...c, docs: newDocs});
+  };
+
+  const [deleteConfirm, setDeleteConfirm] = useState(null);
+  const doDeleteClient = async (id) => {
+    await deleteClient(id);
+    setSel(null);
+    setDeleteConfirm(null);
+  };
+
+  return (
+    <>
+      <div className="fx aic jsb mb4">
+        <div className="tabs" style={{margin:0}}>
+          {[["convention",t("Convention Tonnes","اتفاقية أطنان")],["rotation",t("🔄 Conv. Rotation","🔄 اتفاقية دوراني")],["prepaid",t("Bonus Prépayé","مدفوع مسبقاً")],["cash","Cash"]].map(([tab_id,l])=>(
+            <button key={tab_id} className={`tab${tab===tab_id?" active":""}`} onClick={()=>{setTab(tab_id);setSel(null);}}>{l}</button>
+          ))}
+        </div>
+        <div className="fx aic g2">
+          {tab==="convention"&&(
+            <button className="btn bp bsm" onClick={()=>setModal("add_client")}>➕<span className="btn-lbl"> {t("Nouveau client convention","عميل اتفاقية جديد")}</span></button>
+          )}
+          {tab==="rotation"&&(
+            <button className="btn bp bsm" style={{background:"var(--orange)",borderColor:"var(--orange)"}} onClick={()=>setModal("add_rotation")}>➕<span className="btn-lbl"> {t("Nouveau client rotations","عميل دوراني جديد")}</span></button>
+          )}
+          {tab==="prepaid"&&(
+            <button className="btn bp bsm" onClick={()=>setModal("add_prepaid")}>➕<span className="btn-lbl"> {t("Nouveau client prépayé","عميل مدفوع مسبقاً جديد")}</span></button>
+          )}
+        </div>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"300px 1fr",gap:16}}>
+        <div className="panel" style={{height:"fit-content"}}>
+          <div className="ph">
+            <span className="pt">{tab==="convention"?t("Institutions Convention Tonnes","مؤسسات اتفاقية أطنان"):tab==="rotation"?t("Conventions par Rotation","اتفاقيات دوراني"):tab==="prepaid"?t("Bonus Prépayé","مدفوع مسبقاً"):t("Clients Cash","عملاء نقداً")}</span>
+            <span className="mn tsm tmu">{(tab==="convention"?convClients:tab==="rotation"?rotationClients:tab==="prepaid"?prepaidClients:cashClients).length}</span>
+          </div>
+          <div style={{padding:"10px 10px",display:"flex",flexDirection:"column",gap:5}}>
+            {(tab==="convention"?convClients:tab==="rotation"?rotationClients:tab==="prepaid"?prepaidClients:cashClients).map(cl=>{
+              const isRotTab = tab==="rotation";
+              const isAccountType = tab==="convention"||tab==="rotation"||tab==="prepaid";
+              const now2 = new Date();
+              const rotPfx = cl.payFrequency==="monthly"
+                ? `${now2.getFullYear()}-${String(now2.getMonth()+1).padStart(2,"0")}`
+                : now2.getFullYear().toString();
+              const rotUsed = isRotTab&&cl.status==="approved"
+                ? discharges.filter(d=>d.clientId===cl.id&&tsMatchesPfx(d.ts,rotPfx)&&d.status!=="cancelled").length
+                : 0;
+              const rotPct = isRotTab&&cl.weightLimitYear>0 ? Math.round((rotUsed/cl.weightLimitYear)*100) : 0;
+              const pct=isRotTab?rotPct:creditPct(cl); const col=creditColor(pct);
+              return (
+                <button key={cl.id} onClick={()=>setSel(cl.id)} style={{
+                  width:"100%",textAlign:"left",padding:"10px 12px",borderRadius:8,cursor:"pointer",
+                  border:`1px solid ${sel===cl.id?isRotTab?"var(--orange)":"var(--g)":"var(--bdr)"}`,
+                  background:sel===cl.id?isRotTab?"rgba(251,146,60,.07)":"rgba(46,201,92,.07)":"var(--s2)",
+                }}>
+                  <div className="fx aic jsb">
+                    <span style={{fontWeight:700,fontSize:12,maxWidth:150,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{cl.name}</span>
+                    <div className="fx aic g1">
+                      {!cl.consentGiven&&<span title="Consentement Loi 18-07 manquant" style={{fontSize:11,color:"var(--err)"}}>🔒</span>}
+                      {isAccountType
+                        ?<ClientStatusBadge s={cl.status}/>
+                        :<span className="badge b-cash">Cash</span>}
+                    </div>
+                  </div>
+                  {isRotTab&&cl.status==="approved"&&(
+                    <>
+                      <div className="cbt mt2"><div className="cbf" style={{width:`${Math.min(pct,100)}%`,background:col}}/></div>
+                      <div className="tsm tmu mt1" style={{fontSize:10}}>
+                        {rotUsed}/{cl.weightLimitYear||"?"} rotations · {pct}%
+                      </div>
+                    </>
+                  )}
+                  {!isRotTab&&isAccountType&&cl.status==="approved"&&(
+                    <>
+                      <div className="cbt mt2"><div className="cbf" style={{width:`${Math.min(pct,100)}%`,background:col}}/></div>
+                      <div className="tsm tmu mt1" style={{fontSize:10}}>
+                        {cl.type==="prepaid"
+                          ?<span style={{color:col,fontWeight:pct>=70?700:400}}>
+                            {pct>=100?t("🔴 Solde épuisé","🔴 رصيد منتهٍ"):pct>=90?t("🔴 Solde critique: ","🔴 رصيد حرج: ")+fmt(Math.max(0,cl.creditLimit-cl.consumed)):pct>=70?t("🟠 Solde bas: ","🟠 رصيد منخفض: ")+fmt(Math.max(0,cl.creditLimit-cl.consumed)):t("Solde: ","الرصيد: ")+fmt(Math.max(0,cl.creditLimit-cl.consumed))}
+                          </span>
+                          :cl.creditEnabled&&cl.consumed>cl.creditLimit
+                            ?<span style={{color:"var(--err)",fontWeight:700}}>⚠ Dette: {fmt(cl.consumed-cl.creditLimit)}</span>
+                            :`${pct}%`}
+                        {" · "}{cl.type==="prepaid"?`${pct}% consommé`:cl.creditEnabled&&cl.consumed>cl.creditLimit?fmt(cl.consumed-cl.creditLimit):fmt(cl.consumed)}
+                      </div>
+                    </>
+                  )}
+                  {isAccountType&&cl.status!=="approved"&&(
+                    <div style={{fontSize:10,color:"var(--muted)",marginTop:3}}>{cl.clientType==="state"?t("🏛 Etat","🏛 الدولة"):t("🏢 Privé","🏢 خاص")} · {t("Dossier en cours","الملف قيد الدراسة")}</div>
+                  )}
+                  {(cl.serviceType==="treat_and_collect"||cl.serviceType==="both")&&(
+                    <div style={{marginTop:4,display:"flex",gap:4,flexWrap:"wrap"}}>
+                      {cl.serviceType==="both"&&<span style={{fontSize:9,padding:"1px 5px",borderRadius:4,background:"rgba(46,201,92,.1)",color:"var(--g)",border:"1px solid rgba(46,201,92,.3)"}}>🏭 {t("Traitement","معالجة")}</span>}
+                      <span style={{fontSize:9,padding:"1px 5px",borderRadius:4,background:"rgba(139,92,246,.1)",color:"var(--purple)",border:"1px solid rgba(139,92,246,.3)"}}>🚛 {t("Collecte et Traitement","جمع ومعالجة")}</span>
+                    </div>
+                  )}
+                  {tab==="cash"&&(
+                    <div style={{fontSize:10,color:"var(--muted)",marginTop:3}}>{cl.phone}</div>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div>
+          {sel&&c?(
+            <>
+              <div className="card mb4">
+                <div className="fx jsb aic mb3">
+                  <div>
+                    <div style={{fontFamily:"var(--head)",fontSize:20,fontWeight:800}}>{c.name}</div>
+                    <div className="mn tsm tmu mt1">{c.id}</div>
+                  </div>
+                  <div className="fx aic g2">
+                    {c.type==="convention"&&(
+                      <span className={`badge ${c.clientType==="state"?"b-purple":"b-info"}`}>
+                        {c.clientType==="state"?t("🏛 Institution État","🏛 مؤسسة دولة"):t("🏢 Entreprise Privée","🏢 مؤسسة خاصة")}
+                      </span>
+                    )}
+                    {c.type==="prepaid"&&<span className="badge b-info">🎫 {t("Bonus Prépayé","مدفوع مسبقاً")}</span>}
+                    {c.type==="daily"&&<span className="badge b-cash">💵 {t("Client Cash","عميل نقداً")}</span>}
+                    {c.type==="rotation"&&<span className="badge" style={{background:"rgba(251,146,60,.12)",color:"var(--orange)",border:"1px solid rgba(251,146,60,.3)"}}>🔄 {t("Convention Rotation","اتفاقية دوراني")}</span>}
+                    {c.type==="rotation"&&<ClientStatusBadge s={c.status}/>}
+                    {c.type==="convention"&&<ClientStatusBadge s={c.status}/>}
+                    {c.serviceType==="treatment_only"&&<span className="badge" style={{background:"rgba(46,201,92,.1)",color:"var(--g)",border:"1px solid rgba(46,201,92,.3)",fontSize:10}}>🏭 {t("Traitement","معالجة")}</span>}
+                    {c.serviceType==="treat_and_collect"&&<span className="badge" style={{background:"rgba(139,92,246,.1)",color:"var(--purple)",border:"1px solid rgba(139,92,246,.3)",fontSize:10}}>🚛 {t("Collecte et Traitement","جمع ومعالجة")}</span>}
+                    {c.serviceType==="both"&&<><span className="badge" style={{background:"rgba(46,201,92,.1)",color:"var(--g)",border:"1px solid rgba(46,201,92,.3)",fontSize:10}}>🏭 {t("Traitement","معالجة")}</span><span className="badge" style={{background:"rgba(139,92,246,.1)",color:"var(--purple)",border:"1px solid rgba(139,92,246,.3)",fontSize:10}}>🚛 {t("Collecte et Traitement","جمع ومعالجة")}</span></>}
+                    {isAdmin&&(
+                      <div className="fx aic g2">
+                        <button className="btn bg bsm" style={{fontSize:10,padding:"3px 8px"}}
+                          onClick={()=>{setEditClientForm({...c});setModal("edit_client");}}>
+                          ✏️ {t("Modifier","تعديل")}
+                        </button>
+                        <button className="btn be bsm" style={{fontSize:10,padding:"3px 8px"}}
+                          onClick={()=>setDeleteConfirm(c.id)}>
+                          🗑 {t("Supprimer","حذف")}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="fg fg3 mb3">
+                  {[[t("Téléphone","الهاتف"),c.phone||"—"],[t("Adresse","العنوان"),c.address||"—"],["NIF",c.nif||"—"]].map(([l,v])=>(
+                    <div key={l} className="card-sm"><div style={{fontSize:9,fontFamily:"var(--mono)",color:"var(--muted)",textTransform:"uppercase",letterSpacing:".1em"}}>{l}</div><div style={{marginTop:4,fontSize:12,fontWeight:600}}>{v}</div></div>
+                  ))}
+                  <div className="card-sm">
+                    <div style={{fontSize:9,fontFamily:"var(--mono)",color:"var(--muted)",textTransform:"uppercase",letterSpacing:".1em"}}>{t("Régime TVA","نظام TVA")}</div>
+                    <div style={{marginTop:4}}>
+                      {c.vatSubject
+                        ? <span className="badge b-warn" style={{fontSize:10}}>✅ {t("Assujetti TVA","خاضع للضريبة")}</span>
+                        : <span className="badge" style={{background:"rgba(100,116,139,.1)",color:"var(--muted)",border:"1px solid var(--bdr)",fontSize:10}}>🚫 {t("Non assujetti","غير خاضع")}</span>
+                      }
+                    </div>
+                  </div>
+                </div>
+
+                {/* ── Consentement Loi 18-07 ── */}
+                <div style={{border:`1px solid ${c.consentGiven?"rgba(46,201,92,.35)":"rgba(220,50,50,.3)"}`,borderRadius:10,padding:"12px 14px",background:c.consentGiven?"rgba(46,201,92,.05)":"rgba(220,50,50,.04)",marginBottom:14}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                    <div>
+                      <div style={{fontWeight:700,fontSize:12,marginBottom:2}}>
+                        {c.consentGiven
+                          ? <><span style={{color:"var(--g)"}}>✅</span> {t("Consentement Loi 18-07 enregistré","تم تسجيل الموافقة — القانون 18-07")}</>
+                          : <><span style={{color:"var(--err)"}}>🔒</span> {t("Consentement Loi 18-07 manquant — Dossier bloqué","موافقة القانون 18-07 مفقودة — الملف محجوب")}</>
+                        }
+                      </div>
+                      {c.consentGiven && c.consentDate && (
+                        <div style={{fontSize:10,color:"var(--muted)"}}>
+                          {t("Accordé le","تم منحه في")} {new Date(c.consentDate).toLocaleDateString("fr-DZ")}
+                          {c.consentBy && ` · ${t("par","بواسطة")} ${c.consentBy}`}
+                        </div>
+                      )}
+                      {!c.consentGiven && (
+                        <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>
+                          {t("Toute opération de déchargement est bloquée jusqu'à enregistrement du consentement.","جميع عمليات التفريغ محجوبة حتى تسجيل الموافقة.")}
+                        </div>
+                      )}
+                    </div>
+                    {isAdmin && (
+                      <button
+                        className={`btn bsm ${c.consentGiven?"be":"bp"}`}
+                        style={{fontSize:11,padding:"4px 10px",whiteSpace:"nowrap",
+                          ...(c.consentGiven?{color:"var(--err)",background:"transparent",border:"1px solid var(--err)"}:{})}}
+                        onClick={async ()=>{
+                          if (c.consentGiven) {
+                            if (!window.confirm(t("Révoquer le consentement de ce client ? Ses opérations seront bloquées.","هل تريد سحب موافقة هذا العميل؟ ستُوقَف عملياته."))) return;
+                            updateClient({...c, consentGiven:false, consentDate:null, consentBy:null});
+                          } else {
+                            const now = new Date().toISOString();
+                            const by  = authUser?.name||authUser?.id;
+                            updateClient({...c, consentGiven:true, consentDate:now, consentBy:by});
+                            try {
+                              await apiFetch('/api/compliance/consent',{
+                                method:'POST',headers:{'Content-Type':'application/json'},
+                                body:JSON.stringify({userId:`client_${c.id}`,scope:'client_consent',detail:`Client: ${c.name}`}),
+                              });
+                            } catch(e) {}
+                          }
+                        }}>
+                        {c.consentGiven ? t("↩ Révoquer","↩ سحب") : t("✅ Enregistrer le consentement","✅ تسجيل الموافقة")}
+                      </button>
+                    )}
+                  </div>
+                  {isAdmin && !c.consentGiven && (
+                    <div style={{marginTop:10,background:"var(--s2)",borderRadius:8,padding:"10px 12px",border:"1px solid var(--bdr)"}}>
+                      <div style={{fontSize:11,fontWeight:600,marginBottom:6}}>
+                        📋 {t("Texte de consentement à soumettre au client","نص الموافقة الواجب تقديمه للعميل")} :
+                      </div>
+                      <div style={{fontSize:11,color:"var(--muted)",lineHeight:1.6,fontStyle:"italic"}}>
+                        {t(
+                          `"Je soussigné(e), représentant de ${c.name}, consens au traitement de mes données personnelles et celles de mon organisation par CETManager Démo, à des fins de gestion des opérations de déchargement, conformément à la Loi 18-07 du 10 juin 2018 relative à la protection des données à caractère personnel."`,
+                          `"أنا الموقع أدناه، ممثل ${c.name}، أوافق على معالجة بياناتي الشخصية وبيانات مؤسستي من قِبَل CETManager الديمو، لأغراض إدارة عمليات التفريغ، وفقًا للقانون 18-07 المؤرخ في 10 يونيو 2018 المتعلق بحماية البيانات ذات الطابع الشخصي."`
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Authorized waste types */}
+                <div style={{marginBottom:14}}>
+                  <div style={{fontWeight:700,fontSize:13,marginBottom:8}}>♻️ {t("Types de déchets autorisés","أنواع النفايات المسموحة")}
+                    {isAdmin&&<span style={{fontWeight:400,fontSize:10,color:"var(--muted)",marginLeft:8}}>{t("définis par l'admin","محددة من الأدمن")}</span>}
+                  </div>
+                  {(c.allowedWasteTypes||[]).length>0
+                    ? <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                        {(c.allowedWasteTypes||[]).map(id=>{
+                          const wt=(wasteTypes||[]).find(w=>w.id===id);
+                          return wt?<span key={id} className="badge b-info" style={{fontSize:11,padding:"3px 10px"}}>♻️ {wt.label}</span>:null;
+                        })}
+                      </div>
+                    : <div className="alrt aw" style={{padding:"8px 12px",fontSize:11}}>
+                        <span>⚠️</span>
+                        <div>{t("Aucun type de déchet autorisé défini pour ce client.","لم يُحدَّد أي نوع نفايات مسموح به لهذا العميل.")}
+                          {isAdmin&&<button className="btn bg bsm" style={{fontSize:10,marginLeft:8}} onClick={()=>{setEditClientForm({...c});setModal("edit_client");}}>{t("Définir maintenant","تحديد الآن")}</button>}
+                        </div>
+                      </div>
+                  }
+                </div>
+
+                {c.type==="prepaid"&&(()=>{
+                  const pp = creditPct(c);
+                  const remaining = Math.max(0, c.creditLimit - c.consumed);
+                  const isLow      = pp >= 70 && pp < 90;
+                  const isCritical = pp >= 90 && pp < 100;
+                  const isDepleted = pp >= 100;
+                  return (
+                    <>
+                      {isDepleted&&(
+                        <div className="alrt ae mb3" style={{padding:"10px 14px"}}>
+                          <span style={{fontSize:16}}>🔴</span>
+                          <div><strong>{t("Solde épuisé !","الرصيد منتهٍ!")}</strong> {t("Ce client a consommé la totalité de son dépôt prépayé. Aucune nouvelle décharge n'est possible jusqu'au rechargement du solde.","استنفذ هذا العميل كامل رصيده المدفوع مسبقاً. لا يمكن إجراء أي تفريغ جديد حتى إعادة الشحن.")}</div>
+                        </div>
+                      )}
+                      {isCritical&&(
+                        <div className="alrt ae mb3" style={{padding:"10px 14px"}}>
+                          <span style={{fontSize:16}}>🔴</span>
+                          <div><strong>{t("Solde critique !","رصيد حرج!")}</strong> {t("Il reste seulement","تبقى فقط")} <strong>{fmt(remaining)} DA</strong> ({100-pp}% {t("du dépôt","من الرصيد")}). {t("Contacter le client pour un rechargement urgent.","تواصل مع العميل لإعادة الشحن عاجلاً.")}</div>
+                        </div>
+                      )}
+                      {isLow&&(
+                        <div className="alrt aw mb3" style={{padding:"10px 14px"}}>
+                          <span style={{fontSize:16}}>🟠</span>
+                          <div><strong>{t("Solde bas :","رصيد منخفض:")}</strong> {t("Il reste","تبقى")} <strong>{fmt(remaining)} DA</strong> ({100-pp}% {t("du dépôt initial","من الرصيد الأولي")}). {t("Pensez à prévenir le client pour un rechargement.","تذكّر إخطار العميل بضرورة إعادة الشحن.")}</div>
+                        </div>
+                      )}
+                      <div className="fg fg3 mb3">
+                        {[
+                          [t("Solde Total (DA)","الرصيد الإجمالي (دج)"),  fmt(c.creditLimit),    "var(--muted)"],
+                          [t("Consommé","المستهلك"),          fmt(c.consumed),       creditColor(pp)],
+                          [t("Solde Disponible","الرصيد المتاح"),  fmt(remaining),        isDepleted?"var(--err)":isCritical?"var(--err)":isLow?"var(--warn)":"var(--g)"],
+                        ].map(([l,v,col])=>(
+                          <div key={l} className="card-sm" style={{borderTop:`2px solid ${col}`}}>
+                            <div style={{fontSize:9,fontFamily:"var(--mono)",color:"var(--muted)",textTransform:"uppercase",letterSpacing:".1em"}}>{l}</div>
+                            <div style={{fontFamily:"var(--head)",fontSize:16,fontWeight:800,color:col,marginTop:4}}>{v}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  );
+                })()}
+
+                {(c.type==="convention"||c.type==="rotation")&&c.status==="approved"&&(
+                  <div className="fg fg3 mb3">
+                    {(()=>{
+                      const now = new Date();
+                              const isRotation = c.type==="rotation";
+                      const isMonthly = c.payFrequency==="monthly";
+                      const periodPrefix = isMonthly
+                        ? `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`
+                        : now.getFullYear().toString();
+                      const periodDischarges = discharges.filter(d=>d.clientId===c.id&&d.ts.startsWith(periodPrefix)&&d.status!=="cancelled");
+                      const usedPeriod = isRotation ? periodDischarges.length : periodDischarges.reduce((s,d)=>s+d.net,0);
+                      const pct = c.weightLimitYear>0 ? Math.round((usedPeriod/c.weightLimitYear)*100) : 0;
+                      const col = pct>80?"var(--err)":pct>60?"var(--warn)":"var(--g)";
+                      const periodLbl = isMonthly ? now.toLocaleString("fr-DZ",{month:"long",year:"numeric"}) : String(now.getFullYear());
+                      const isOverCredit = c.creditEnabled && c.consumed > c.creditLimit;
+                      const rows = c.creditEnabled ? [
+                        [t("Limite Crédit (DA)","حد الائتمان (دج)"), fmt(c.creditLimit),                                       "var(--muted)"],
+                        [t("Consommé","المستهلك"),           fmt(c.consumed),                                          creditColor(creditPct(c))],
+                        [isOverCredit?t("Dette","دين"):t("Disponible","المتاح"), fmt(Math.abs(c.creditLimit-c.consumed)), isOverCredit?"var(--err)":"var(--g)"],
+                      ] : isRotation ? [
+                        [isMonthly?t("Quota Mensuel (rot.)","الحصة الشهرية (دورة)"):t("Quota Annuel (rot.)","الحصة السنوية (دورة)"), c.weightLimitYear+" rot.", "var(--muted)"],
+                        [isMonthly?t("Rotations ce mois","الدورات هذا الشهر"):t("Rotations cette année","الدورات هذا العام"),  usedPeriod+" rot.",        creditColor(pct)],
+                        [t("Restant","المتبقي"),                                               Math.max(0,c.weightLimitYear-usedPeriod)+" rot.", "var(--g)"],
+                      ] : [
+                        [isMonthly?t("Quota Mensuel (t)","الحصة الشهرية (ط)"):t("Quota Annuel (t)","الحصة السنوية (ط)"), fmtN(c.weightLimitYear)+" t", "var(--muted)"],
+                        [isMonthly?t("Mois en cours","الشهر الحالي"):t("Année en cours","السنة الحالية"),       fmtN(usedPeriod)+" t",        creditColor(pct)],
+                        [t("Restant","المتبقي"),                                         fmtN(Math.max(0,c.weightLimitYear-usedPeriod))+" t", "var(--g)"],
+                      ];
+                      return (<>
+                        {rows.map(([l,v,c2])=>(
+                          <div key={l} className="card-sm" style={{borderTop:`2px solid ${c2}`}}>
+                            <div style={{fontSize:9,fontFamily:"var(--mono)",color:"var(--muted)",textTransform:"uppercase",letterSpacing:".1em"}}>{l}</div>
+                            <div style={{fontFamily:"var(--head)",fontSize:16,fontWeight:800,color:c2,marginTop:4}}>{v}</div>
+                          </div>
+                        ))}
+                        {!c.creditEnabled&&c.weightLimitYear>0&&(
+                          <div style={{gridColumn:"1/-1",marginTop:-4}}>
+                            <div className="cbt" style={{height:6}}><div className="cbf" style={{width:`${Math.min(pct,100)}%`,background:col}}/></div>
+                            <div className="fx jsb mt1">
+                              <span className="tsm tmu">{t("Progression","التقدم")} {periodLbl}</span>
+                              <span className="mn tsm" style={{color:col}}>{pct}%</span>
+                            </div>
+                          </div>
+                        )}
+                      </>);
+                    })()}
+                  </div>
+                )}
+
+                {(c.assignedSites&&c.assignedSites.length>0)&&(
+                  <div className="fx aic g2 mb2" style={{fontSize:11,flexWrap:"wrap"}}>
+                    <span style={{color:"var(--muted)"}}>📍 {t("Centres autorisés :","المراكز المخوّلة:")}</span>
+                    {c.assignedSites.map(sid=>{
+                      const s=(sites||[]).find(x=>x.id===sid);
+                      return(
+                        <span key={sid} className="badge b-info" style={{fontSize:10,fontWeight:700,display:"inline-flex",alignItems:"center",gap:4}}>
+                          {s?.name||sid}
+                          <span style={{opacity:.7,fontWeight:400}}>{s?.type}</span>
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+                {(c.type==="convention"||c.type==="rotation")&&c.payFrequency&&(
+                  <div className="fx aic g3 mb3" style={{fontSize:11,color:"var(--muted)"}}>
+                    <span>📅 {t("Facturation:","الفوترة:")} <strong style={{color:"var(--txt)"}}>{c.payFrequency==="monthly"?t("Mensuelle","شهرية"):t("Annuelle","سنوية")}</strong></span>
+                    {c.type==="convention"&&<span>💳 {t("Instrument:","الوسيلة:")} <strong style={{color:"var(--txt)"}}>{c.payInstrument==="bank"?t("Virement bancaire","تحويل بنكي"):t("Chèque","شيك")}</strong></span>}
+                  </div>
+                )}
+
+                {/* Documents section for convention / rotation / prepaid clients */}
+                {(c.type==="convention"||c.type==="rotation"||c.type==="prepaid")&&(
+                  <div>
+                    <div style={{fontWeight:700,fontSize:13,marginBottom:10}}>📄 {t("Documents requis","الوثائق المطلوبة")}
+                      {isAdmin&&<span style={{fontWeight:400,fontSize:10,color:"var(--muted)",marginLeft:8}}>{t("Cliquez pour marquer reçu/manquant","اضغط للتعليم كمستلم/مفقود")}</span>}
+                    </div>
+                    <div style={{marginBottom:12}}>
+                      {requiredDocs.map(doc=>{
+                        const submitted = c.docs.includes(doc);
+                        return (
+                          <div key={doc} className="doc-item"
+                            style={{cursor:isAdmin?"pointer":"default",borderRadius:6,padding:"6px 8px",
+                              background:submitted?"rgba(46,201,92,.05)":"transparent",
+                              border:`1px solid ${submitted?"rgba(46,201,92,.2)":"var(--bdr)"}`,marginBottom:4}}
+                            onClick={()=>isAdmin&&toggleDoc(doc)}>
+                            <span style={{fontSize:16}}>{submitted?"✅":"⬜"}</span>
+                            <span style={{flex:1,fontSize:12}}>{doc}</span>
+                            {submitted?<span className="badge b-ok" style={{fontSize:8}}>{t("Reçu","مُستلم")}</span>:<span className="badge b-warn" style={{fontSize:8}}>{t("Manquant","مفقود")}</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {c.note&&(
+                      <div className="alrt ai mb3" style={{marginBottom:14}}>
+                        <span>📝</span><span>{c.note}</span>
+                      </div>
+                    )}
+
+                    {(c.status==="under_review"||c.status==="pending_docs")&&(
+                      <div className="fx g3">
+                        <button className="btn bp bsm" onClick={()=>{
+                          if(c.type==="rotation"){setApproveMode("rotation");setRotationInput(String(c.weightLimitYear||0));setQuotaPeriod(c.payFrequency==="monthly"?"month":"year");}
+                          else{setCreditInput("500000");}
+                          setModal("approve");
+                        }}>
+                          ✓ {t("Approuver le dossier","الموافقة على الملف")}
+                        </button>
+                        <button className="btn be bsm" onClick={()=>setModal("reject")}>
+                          ✗ {t("Rejeter","رفض")}
+                        </button>
+                      </div>
+                    )}
+                    {c.status==="approved"&&(
+                      <div className="fx aic g2" style={{flexWrap:"wrap"}}>
+                        <span className="badge b-ok">✓ {t("Dossier validé","الملف مُعتمد")}</span>
+                        <button className="btn bsm bg" style={{fontSize:10}} onClick={()=>{
+                          if(c.type==="rotation"){setApproveMode("rotation");setRotationInput(String(c.weightLimitYear||0));setQuotaPeriod(c.payFrequency==="monthly"?"month":"year");}
+                          else if(c.creditEnabled){setApproveMode("credit");setCreditInput(String(c.creditLimit));}
+                          else{setApproveMode("weight");setWeightInput(String(c.weightLimitYear));setQuotaPeriod(c.payFrequency==="monthly"?"month":"year");}
+                          setModal("approve");
+                        }}>
+                          ✏️ {t("Modifier conditions","تعديل الشروط")}
+                        </button>
+                        {isAdmin&&(
+                          <button className="btn be bsm" style={{fontSize:10}} onClick={()=>{setNote("");setModal("reject");}}>
+                            ✗ {t("Révoquer","إلغاء الاعتماد")}
+                          </button>
+                        )}
+                        <button className="btn bsm" style={{fontSize:10,background:"var(--info)",color:"#fff",borderColor:"var(--info)"}} onClick={()=>{
+                          const html = generateEmptyBillHTML(c, company);
+                          const blob = new Blob(['\ufeff', html], {type:'application/msword'});
+                          const url  = URL.createObjectURL(blob);
+                          const a    = document.createElement('a');
+                          a.href     = url;
+                          a.download = `MODELE-FACTURE-${c.id}-${c.name.replace(/\s+/g,'-')}.doc`;
+                          document.body.appendChild(a);
+                          a.click();
+                          document.body.removeChild(a);
+                          URL.revokeObjectURL(url);
+                        }}>
+                          📄 {t("Modèle vierge (.doc)","نموذج فارغ (.doc)")}
+                        </button>
+                      </div>
+                    )}
+                    {c.status==="rejected"&&(
+                      <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                        <div className="alrt ae" style={{marginBottom:0,padding:"8px 12px"}}>
+                          <span>✗</span>
+                          <div style={{fontSize:11}}>
+                            <strong>{t("Dossier rejeté","الملف مرفوض")}</strong>
+                            {c.note&&<div style={{marginTop:2,color:"var(--muted)"}}>{c.note}</div>}
+                          </div>
+                        </div>
+                        {isAdmin&&(
+                          <div className="fx aic g2">
+                            <button className="btn bp bsm" style={{fontSize:10}} onClick={()=>{
+                              setNote("");
+                              if(c.type==="rotation"){setApproveMode("rotation");setRotationInput(String(c.weightLimitYear||0));setQuotaPeriod(c.payFrequency==="monthly"?"month":"year");}
+                              else if(c.creditEnabled){setApproveMode("credit");setCreditInput(String(c.creditLimit||500000));}
+                              else{setApproveMode("weight");setWeightInput(String(c.weightLimitYear||0));setQuotaPeriod(c.payFrequency==="monthly"?"month":"year");}
+                              setModal("approve");
+                            }}>
+                              ✓ {t("Réapprouver","إعادة الاعتماد")}
+                            </button>
+                            <button className="btn bw bsm" style={{fontSize:10}} onClick={()=>{setNote(c.note||"");setModal("reject");}}>
+                              ✏️ {t("Modifier motif","تعديل السبب")}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Delete confirmation modal */}
+              {deleteConfirm===c.id&&(
+                <div className="ov">
+                  <div className="modal">
+                    <div className="mh"><span className="mh-title">🗑 {t("Supprimer le client","حذف العميل")}</span><button className="btn bg bsm" onClick={()=>setDeleteConfirm(null)}>✕</button></div>
+                    <div className="mb2">
+                      <div className="alrt ae mb3">
+                        <span>⚠</span>
+                        <div><strong>{t("Supprimer","حذف")} {c.name} ?</strong><div style={{fontSize:11,marginTop:4}}>{t("Cette action est irréversible. L'historique des dépôts sera conservé.","هذا الإجراء لا يمكن التراجع عنه. سيتم الاحتفاظ بسجل التفريغ.")}</div></div>
+                      </div>
+                    </div>
+                    <div className="mf">
+                      <button className="btn bg" onClick={()=>setDeleteConfirm(null)}>{t("Annuler","إلغاء")}</button>
+                      <button className="btn be" onClick={()=>doDeleteClient(c.id)}>🗑 {t("Confirmer la suppression","تأكيد الحذف")}</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {cd.length > 0 && (
+                <div className="panel">
+                  <div className="ph"><span className="pt">{t("Historique des dépôts","سجل التفريغ")}</span><span className="tsm tmu">{cd.length} {t("entrées","سجل")}</span></div>
+                  <div className="tw">
+                    <table>
+                      <thead><tr><th>{t("Date","التاريخ")}</th><th>{t("Site","الموقع")}</th><th>{t("Camion","الشاحنة")}</th><th>{t("Net(t)","الصافي(ط)")}</th><th>{t("Total","المجموع")}</th><th>{t("Paiement","الدفع")}</th><th>{t("Statut","الحالة")}</th></tr></thead>
+                      <tbody>
+                        {cd.map(d=>{
+                          const dp = discPayments[d.id];
+                          const paidTTC  = dp?.paidTTC || 0;
+                          const totalTTC = c?.vatSubject ? Math.round(d.total * 1.19 * 100)/100 : d.total;
+                          const remTTC   = Math.max(0, totalTTC - paidTTC);
+                          const hasTrail = dp?.details?.length > 0;
+                          const isExp    = expandedDisc === d.id;
+                          return (
+                          <React.Fragment key={d.id}>
+                          <tr style={{cursor:hasTrail?"pointer":undefined}}
+                              onClick={hasTrail?()=>setExpandedDisc(isExp?null:d.id):undefined}>
+                            <td className="mn">{fmtTs(d.ts)}</td>
+                            <td><span className="badge b-info">{d.siteId}</span></td>
+                            <td className="mn">{d.truck}</td>
+                            <td className="mn">{fmtN(d.net)}</td>
+                            <td className="mn tg">{fmt(d.total)}</td>
+                            <td style={{minWidth:110}}>
+                              {paidTTC <= 0
+                                ? <span style={{color:"var(--muted)",fontSize:11}}>—</span>
+                                : remTTC < 0.005
+                                  ? <span style={{color:"var(--g)",fontSize:11,fontWeight:700}}>✅ Soldé</span>
+                                  : <div style={{fontSize:10,lineHeight:1.5}}>
+                                      <span style={{color:"var(--g)",fontWeight:700}}>{fmt(paidTTC)}</span>
+                                      <span style={{color:"var(--muted)"}}> / {fmt(totalTTC)}</span>
+                                      <div style={{color:"var(--warn)",fontWeight:600}}>reste {fmt(remTTC)}</div>
+                                    </div>}
+                              {hasTrail&&<span style={{fontSize:9,marginLeft:4,color:"var(--indigo)",cursor:"pointer"}}>
+                                {isExp?"▲":"▼"} {dp.details.length} pmt
+                              </span>}
+                            </td>
+                            <td><StatusBadge s={d.status}/></td>
+                          </tr>
+                          {isExp&&(
+                            <tr style={{background:"rgba(99,102,241,.04)"}}>
+                              <td colSpan={7} style={{padding:"8px 16px"}}>
+                                <div style={{fontSize:11,fontWeight:700,color:"var(--indigo)",marginBottom:6}}>
+                                  Détail des paiements appliqués à ce dépôt
+                                </div>
+                                <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                                  <thead>
+                                    <tr style={{color:"var(--muted)"}}>
+                                      <th style={{textAlign:"left",padding:"2px 8px",fontWeight:600}}>Date</th>
+                                      <th style={{textAlign:"left",padding:"2px 8px",fontWeight:600}}>Réf. Paiement</th>
+                                      <th style={{textAlign:"left",padding:"2px 8px",fontWeight:600}}>Réf. Facture</th>
+                                      <th style={{textAlign:"right",padding:"2px 8px",fontWeight:600}}>Montant TTC</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {dp.details.map((p,i)=>(
+                                      <tr key={i} style={{borderTop:"1px solid var(--bdr)"}}>
+                                        <td style={{padding:"3px 8px",fontFamily:"var(--mono)"}}>{p.createdAt ? new Date(p.createdAt).toLocaleDateString("fr-DZ") : "—"}</td>
+                                        <td style={{padding:"3px 8px",fontFamily:"var(--mono)",fontSize:10,color:"var(--indigo)"}}>{p.paymentId||"—"}</td>
+                                        <td style={{padding:"3px 8px",fontFamily:"var(--mono)",fontSize:10,color:"var(--muted)"}}>{p.billId||"—"}</td>
+                                        <td style={{padding:"3px 8px",textAlign:"right",fontWeight:700,fontFamily:"var(--mono)",color:"var(--g)"}}>{fmt(p.appliedTTC)}</td>
+                                      </tr>
+                                    ))}
+                                    <tr style={{borderTop:"2px solid var(--bdr)"}}>
+                                      <td colSpan={3} style={{padding:"3px 8px",fontWeight:700,color:"var(--indigo)"}}>Total réglé</td>
+                                      <td style={{padding:"3px 8px",textAlign:"right",fontWeight:800,fontFamily:"var(--mono)",color:"var(--g)"}}>{fmt(paidTTC)}</td>
+                                    </tr>
+                                  </tbody>
+                                </table>
+                              </td>
+                            </tr>
+                          )}
+                          </React.Fragment>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </>
+          ):(
+            <div className="fx aic jsc" style={{height:280,color:"var(--muted)",flexDirection:"column",gap:10}}>
+              <span style={{fontSize:40}}>👆</span><span>Sélectionnez un client</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Approve modal */}
+      {modal==="approve"&&c&&(
+        <div className="ov">
+          <div className="modal">
+            <div className="mh"><span className="mh-title">✓ {t("Approuver le dossier","الموافقة على الملف")}</span><button className="btn bg bsm" onClick={()=>setModal(false)}>✕</button></div>
+            <div className="mb2">
+              <div className="alrt ao mb3" style={{marginBottom:14}}>
+                <span>✅</span><span>{t("Approbation du dossier de","الموافقة على ملف")} <strong>{c.name}</strong>.</span>
+              </div>
+              <div className="field mb2" style={{marginBottom:14}}>
+                <label>{t("Mode de facturation","طريقة الفوترة")}</label>
+                <div className="seg" style={{marginTop:6}}>
+                  {c.type==="rotation"?(
+                    <button className={`seg-btn${approveMode==="rotation"?" active":""}`}
+                      style={{background:"var(--orange)",color:"#fff",borderColor:"var(--orange)"}}>
+                      🔄 {t("Quota Conv. Rotation","حصة اتفاقية دوراني")}
+                    </button>
+                  ):(
+                    <>
+                      <button className={`seg-btn${approveMode==="weight"?" active":""}`} onClick={()=>setApproveMode("weight")}>
+                        ⚖️ {t("Quota Tonnage","حصة الأطنان")}
+                      </button>
+                      <button className={`seg-btn${approveMode==="credit"?" active":""}`} onClick={()=>setApproveMode("credit")}>
+                        💳 {t("Crédit DA (désigné admin)","ائتمان دج (من الأدمن)")}
+                      </button>
+                    </>
+                  )}
+                </div>
+                <div className="alrt ai" style={{marginTop:8,padding:"8px 12px",fontSize:11}}>
+                  <span>ℹ️</span>
+                  <span>{approveMode==="weight"
+                    ?(quotaPeriod==="month"
+                      ?t("Quota mensuel : le client peut décharger jusqu'à ce seuil par mois calendaire.","الحصة الشهرية: يمكن للعميل التفريغ حتى هذا الحد شهرياً.")
+                      :t("Quota annuel : le client peut décharger jusqu'à ce seuil par année civile.","الحصة السنوية: يمكن للعميل التفريغ حتى هذا الحد سنوياً."))
+                    :approveMode==="rotation"
+                    ?(quotaPeriod==="month"
+                      ?t("Quota mensuel par rotations : chaque passage de camion = 1 rotation. Limite mensuelle.","الحصة الشهرية بالدورات: كل مرور شاحنة = دورة واحدة. حد شهري.")
+                      :t("Quota annuel par rotations : chaque passage de camion = 1 rotation. Limite annuelle.","الحصة السنوية بالدورات: كل مرور شاحنة = دورة واحدة. حد سنوي."))
+                    :t("Crédit DA : uniquement pour les clients désignés par l'admin. La limite est exprimée en Dinars Algériens.","ائتمان بالدينار الجزائري: للعملاء المعيّنين من الأدمن فقط. الحد معبّر عنه بالدينار.")}</span>
+                </div>
+              </div>
+              <div className="fg" style={{gap:12}}>
+                {(approveMode==="weight"||approveMode==="rotation")?(
+                  <>
+                    <div className="field">
+                      <label>{t("Périodicité du quota","دورية الحصة")}</label>
+                      <div className="seg" style={{marginTop:6}}>
+                        <button className={`seg-btn${quotaPeriod==="year"?" active":""}`} onClick={()=>setQuotaPeriod("year")}>
+                          📅 {t("Annuel","سنوي")}
+                        </button>
+                        <button className={`seg-btn${quotaPeriod==="month"?" active":""}`} onClick={()=>setQuotaPeriod("month")}>
+                          🗓 {t("Mensuel","شهري")}
+                        </button>
+                      </div>
+                    </div>
+                    {approveMode==="weight"?(
+                      <div className="field">
+                        <label>{t("Quota","حصة")} {quotaPeriod==="month"?t("mensuel (tonnes/mois)","شهرية (طن/شهر)"):t("annuel (tonnes/an)","سنوية (طن/سنة)")}</label>
+                        <input className="fi" type="number" value={weightInput} onChange={e=>setWeightInput(e.target.value)} placeholder={quotaPeriod==="month"?"ex: 500":"ex: 5000"}/>
+                      </div>
+                    ):(
+                      <div className="field">
+                        <label>{t("Quota","حصة")} {quotaPeriod==="month"?t("mensuel (rotations/mois)","شهرية (دورة/شهر)"):t("annuel (rotations/an)","سنوية (دورة/سنة)")}</label>
+                        <input className="fi" type="number" step="1" min="0" value={rotationInput} onChange={e=>setRotationInput(e.target.value)} placeholder={quotaPeriod==="month"?"ex: 30":"ex: 360"}/>
+                      </div>
+                    )}
+                  </>
+                ):(
+                  <div className="field"><label>{t("Limite de crédit (DA)","حد الائتمان (دج)")}</label>
+                    <input className="fi" type="number" value={creditInput} onChange={e=>setCreditInput(e.target.value)} placeholder="ex: 500000"/>
+                  </div>
+                )}
+                <div className="field"><label>{t("Remarques (optionnel)","ملاحظات (اختياري)")}</label>
+                  <textarea className="fi" value={note} onChange={e=>setNote(e.target.value)} placeholder={t("Conditions particulières, observations...","شروط خاصة، ملاحظات...")}/>
+                </div>
+              </div>
+            </div>
+            <div className="mf"><button className="btn bg" onClick={()=>setModal(false)}>{t("Annuler","إلغاء")}</button><button className="btn bp" onClick={doApprove}>✓ {t("Confirmer l'approbation","تأكيد الموافقة")}</button></div>
+          </div>
+        </div>
+      )}
+
+      {/* Reject modal */}
+      {modal==="reject"&&c&&(
+        <div className="ov">
+          <div className="modal">
+            <div className="mh"><span className="mh-title">✗ {t("Rejeter le dossier","رفض الملف")}</span><button className="btn bg bsm" onClick={()=>setModal(false)}>✕</button></div>
+            <div className="mb2">
+              <div className="alrt ae mb3" style={{marginBottom:14}}><span>⚠</span><span>{t("Vous allez rejeter la demande de convention de","ستقوم برفض طلب اتفاقية")} <strong>{c.name}</strong>.</span></div>
+              <div className="field"><label>{t("Motif du rejet *","سبب الرفض *")}</label>
+                <textarea className="fi" value={note} onChange={e=>setNote(e.target.value)} placeholder={t("Ex: Documents manquants, dossier incomplet...","مثال: وثائق ناقصة، ملف غير مكتمل...")}/>
+              </div>
+            </div>
+            <div className="mf"><button className="btn bg" onClick={()=>setModal(false)}>{t("Annuler","إلغاء")}</button><button className="btn be" disabled={!note} onClick={doReject}>✗ {t("Confirmer le rejet","تأكيد الرفض")}</button></div>
+          </div>
+        </div>
+      )}
+
+      {/* Add client modal */}
+      {modal==="add_client"&&(
+        <div className="ov">
+          <div className="modal modal-lg">
+            <div className="mh"><span className="mh-title">➕ {t("Nouveau client Convention Tonnes","عميل اتفاقية أطنان جديد")}</span><button className="btn bg bsm" onClick={()=>setModal(false)}>✕</button></div>
+            <div className="mb2">
+              <div className="alrt ai mb3" style={{marginBottom:16}}>
+                <span>ℹ️</span><span style={{fontSize:11}}>{t("Le dossier sera créé avec le statut \"Documents manquants\". L'institution devra fournir les pièces justificatives requises avant approbation.","سيُنشأ الملف بحالة «وثائق ناقصة». يجب على المؤسسة تقديم المستندات المطلوبة قبل الاعتماد.")}</span>
+              </div>
+              <div className="fg" style={{gap:12}}>
+                <div className="fg fg2">
+                  <div className="field"><label>{t("Nom / Raison sociale *","الاسم / التسمية التجارية *")}</label>
+                    <input className="fi" value={addForm.name} onChange={e=>setAddForm(f=>({...f,name:e.target.value}))} placeholder={t("Commune de ..., SPA ..., etc.","بلدية ..., ش.ذ.م.م., إلخ")}/>
+                  </div>
+                  <div className="field"><label>{t("Type d'institution","نوع المؤسسة")}</label>
+                    <select className="fi" value={addForm.clientType} onChange={e=>setAddForm(f=>({...f,clientType:e.target.value}))}>
+                      <option value="state">🏛 {t("Institution d'État","مؤسسة حكومية")}</option>
+                      <option value="private">🏢 {t("Entreprise Privée","مؤسسة خاصة")}</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="fg fg2">
+                  <div className="field"><label>{t("Téléphone","الهاتف")}</label>
+                    <input className="fi" value={addForm.phone} onChange={e=>setAddForm(f=>({...f,phone:e.target.value}))} placeholder="000 00 00 00"/>
+                  </div>
+                  <div className="field"><label>{t("Adresse","العنوان")}</label>
+                    <input className="fi" value={addForm.address} onChange={e=>setAddForm(f=>({...f,address:e.target.value}))} placeholder={t("Commune, wilaya","البلدية، الولاية")}/>
+                  </div>
+                </div>
+                <div className="fg fg2">
+                  <div className="field"><label>NIF</label>
+                    <input className="fi" value={addForm.nif} onChange={e=>setAddForm(f=>({...f,nif:e.target.value}))} placeholder="099..."/>
+                  </div>
+                  <div className="field"><label>{t("Registre de Commerce (Privé)","السجل التجاري (خاص)")}</label>
+                    <input className="fi" value={addForm.rc} onChange={e=>setAddForm(f=>({...f,rc:e.target.value}))} placeholder="18/00-0000000B18"/>
+                  </div>
+                </div>
+                <div className="fg fg2">
+                  <div className="field"><label>{t("Fréquence de facturation","دورية الفوترة")}</label>
+                    <select className="fi" value={addForm.payFrequency||"monthly"} onChange={e=>setAddForm(f=>({...f,payFrequency:e.target.value}))}>
+                      <option value="monthly">📅 {t("Mensuelle","شهرية")}</option>
+                      <option value="annual">📆 {t("Annuelle","سنوية")}</option>
+                    </select>
+                  </div>
+                  <div className="field"><label>{t("Mode de paiement","وسيلة الدفع")}</label>
+                    <select className="fi" value={addForm.payInstrument||"cheque"} onChange={e=>setAddForm(f=>({...f,payInstrument:e.target.value}))}>
+                      <option value="cheque">💳 {t("Chèque","شيك")}</option>
+                      <option value="bank">🏦 {t("Virement bancaire","تحويل بنكي")}</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="field">
+                  <label>📍 {t("Centres d'enfouissement autorisés","مراكز الطمر المخوّلة")} <span style={{fontWeight:400,color:"var(--muted)",fontSize:10}}>({t("plusieurs choix possibles","اختيارات متعددة ممكنة")})</span></label>
+                  <div style={{display:"flex",flexDirection:"column",gap:4,marginTop:6}}>
+                    {(sites||[]).filter(s=>s.status==="active").map(s=>{
+                      const checked=(addForm.assignedSites||[]).includes(s.id);
+                      return(
+                        <label key={s.id} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",padding:"7px 10px",borderRadius:6,border:`1px solid ${checked?"var(--g)":"var(--bdr)"}`,background:checked?"rgba(46,201,92,.07)":"transparent",fontSize:12,transition:"all .15s"}}>
+                          <input type="checkbox" checked={checked} style={{accentColor:"var(--g)",width:14,height:14}}
+                            onChange={e=>setAddForm(f=>({...f,assignedSites:e.target.checked?[...(f.assignedSites||[]),s.id]:(f.assignedSites||[]).filter(x=>x!==s.id)}))}/>
+                          <span style={{fontWeight:600,flex:1}}>{s.name}</span>
+                          <span className="badge b-info" style={{fontSize:9}}>{s.type}</span>
+                          <span className="tsm tmu" style={{fontSize:10}}>{s.region}</span>
+                        </label>
+                      );
+                    })}
+                    {(sites||[]).filter(s=>s.status==="active").length===0&&<span className="tsm tmu">Aucun centre actif</span>}
+                  </div>
+                </div>
+                <div className="field">
+                  <label>{t("Note initiale","ملاحظة أولية")}</label>
+                  <textarea className="fi" value={addForm.note} onChange={e=>setAddForm(f=>({...f,note:e.target.value}))} placeholder={t("Observations...","ملاحظات...")}/>
+                </div>
+                <div className="field">
+                  <label>{t("Régime TVA","نظام TVA")}</label>
+                  <div className="seg" style={{marginTop:6}}>
+                    <button className={`seg-btn${addForm.vatSubject===false?" active":""}`} onClick={()=>setAddForm(f=>({...f,vatSubject:false}))}>
+                      🚫 {t("Non assujetti à la TVA","غير خاضع للضريبة")}
+                    </button>
+                    <button className={`seg-btn${addForm.vatSubject===true?" active":""}`} onClick={()=>setAddForm(f=>({...f,vatSubject:true}))}>
+                      ✅ {t("Assujetti à la TVA","خاضع للضريبة")}
+                    </button>
+                  </div>
+                </div>
+                <div style={{background:"var(--s2)",border:"1px solid var(--bdr)",borderRadius:8,padding:"12px 14px"}}>
+                  <div style={{fontWeight:700,fontSize:12,marginBottom:8}}>📋 {t("Documents requis :","الوثائق المطلوبة:")}</div>
+                  {(addForm.clientType==="state"?(docTypes?.state||REQUIRED_DOCS_STATE):(docTypes?.private||REQUIRED_DOCS_PRIVATE)).map(d=>(
+                    <div key={d} className="fx aic g2" style={{marginBottom:5,fontSize:11,color:"var(--muted)"}}>
+                      <span style={{color:"var(--warn)"}}>⬜</span> {d}
+                    </div>
+                  ))}
+                </div>
+                <div className="field">
+                  <label>♻️ {t("Types de déchets autorisés","أنواع النفايات المسموحة")} <span style={{fontWeight:400,color:"var(--muted)",fontSize:10}}>({t("plusieurs choix possibles","اختيارات متعددة ممكنة")})</span></label>
+                  <div style={{display:"flex",flexDirection:"column",gap:4,marginTop:6}}>
+                    {(wasteTypes||[]).map(w=>{
+                      const checked=(addForm.allowedWasteTypes||[]).includes(w.id);
+                      return(
+                        <label key={w.id} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",padding:"7px 10px",borderRadius:6,border:`1px solid ${checked?"var(--g)":"var(--bdr)"}`,background:checked?"rgba(46,201,92,.07)":"transparent",fontSize:12,transition:"all .15s"}}>
+                          <input type="checkbox" checked={checked} style={{accentColor:"var(--g)",width:14,height:14}}
+                            onChange={e=>setAddForm(f=>({...f,allowedWasteTypes:e.target.checked?[...(f.allowedWasteTypes||[]),w.id]:(f.allowedWasteTypes||[]).filter(x=>x!==w.id)}))}/>
+                          <span style={{fontWeight:600,flex:1}}>♻️ {w.label}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="mf"><button className="btn bg" onClick={()=>setModal(false)}>{t("Annuler","إلغاء")}</button><button className="btn bp" disabled={!addForm.name} onClick={doAddClient}>✓ {t("Créer le dossier","إنشاء الملف")}</button></div>
+          </div>
+        </div>
+      )}
+
+      {/* Add rotation client modal */}
+      {modal==="add_rotation"&&(
+        <div className="ov">
+          <div className="modal modal-lg">
+            <div className="mh"><span className="mh-title">🔄 {t("Nouveau client Convention Rotation","عميل اتفاقية دوراني جديد")}</span><button className="btn bg bsm" onClick={()=>setModal(false)}>✕</button></div>
+            <div className="mb2">
+              <div className="alrt ai mb3" style={{marginBottom:16}}>
+                <span>ℹ️</span><span style={{fontSize:11}}>{t("Le dossier sera créé avec le statut \"Documents manquants\". Le quota en rotations sera défini lors de l'approbation.","سيُنشأ الملف بحالة «وثائق ناقصة». ستُحدَّد حصة الدورات عند الاعتماد.")}</span>
+              </div>
+              <div className="fg" style={{gap:12}}>
+                <div className="fg fg2">
+                  <div className="field"><label>{t("Nom / Raison sociale *","الاسم / التسمية التجارية *")}</label>
+                    <input className="fi" value={addRotForm.name} onChange={e=>setAddRotForm(f=>({...f,name:e.target.value}))} placeholder={t("Commune de ..., SPA ..., etc.","بلدية ..., ش.ذ.م.م., إلخ")}/>
+                  </div>
+                  <div className="field"><label>{t("Type d'institution","نوع المؤسسة")}</label>
+                    <select className="fi" value={addRotForm.clientType} onChange={e=>setAddRotForm(f=>({...f,clientType:e.target.value}))}>
+                      <option value="state">🏛 {t("Institution d'État","مؤسسة حكومية")}</option>
+                      <option value="private">🏢 {t("Entreprise Privée","مؤسسة خاصة")}</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="fg fg2">
+                  <div className="field"><label>{t("Téléphone","الهاتف")}</label>
+                    <input className="fi" value={addRotForm.phone} onChange={e=>setAddRotForm(f=>({...f,phone:e.target.value}))} placeholder="000 00 00 00"/>
+                  </div>
+                  <div className="field"><label>{t("Adresse","العنوان")}</label>
+                    <input className="fi" value={addRotForm.address} onChange={e=>setAddRotForm(f=>({...f,address:e.target.value}))} placeholder={t("Commune, wilaya","البلدية، الولاية")}/>
+                  </div>
+                </div>
+                <div className="fg fg2">
+                  <div className="field"><label>NIF</label>
+                    <input className="fi" value={addRotForm.nif} onChange={e=>setAddRotForm(f=>({...f,nif:e.target.value}))} placeholder="099..."/>
+                  </div>
+                  <div className="field"><label>{t("Registre de Commerce (Privé)","السجل التجاري (خاص)")}</label>
+                    <input className="fi" value={addRotForm.rc} onChange={e=>setAddRotForm(f=>({...f,rc:e.target.value}))} placeholder="18/00-0000000B18"/>
+                  </div>
+                </div>
+                <div className="field"><label>{t("Périodicité du quota","دورية الحصة")}</label>
+                  <select className="fi" value={addRotForm.payFrequency} onChange={e=>setAddRotForm(f=>({...f,payFrequency:e.target.value}))}>
+                    <option value="monthly">🗓 {t("Mensuelle (rotations/mois)","شهرية (دورة/شهر)")}</option>
+                    <option value="annual">📅 {t("Annuelle (rotations/an)","سنوية (دورة/سنة)")}</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label>📍 {t("Centres d'enfouissement autorisés","مراكز الطمر المخوّلة")} <span style={{fontWeight:400,color:"var(--muted)",fontSize:10}}>({t("plusieurs choix possibles","اختيارات متعددة ممكنة")})</span></label>
+                  <div style={{display:"flex",flexDirection:"column",gap:4,marginTop:6}}>
+                    {(sites||[]).filter(s=>s.status==="active").map(s=>{
+                      const checked=(addRotForm.assignedSites||[]).includes(s.id);
+                      return(
+                        <label key={s.id} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",padding:"7px 10px",borderRadius:6,border:`1px solid ${checked?"var(--g)":"var(--bdr)"}`,background:checked?"rgba(46,201,92,.07)":"transparent",fontSize:12,transition:"all .15s"}}>
+                          <input type="checkbox" checked={checked} style={{accentColor:"var(--g)",width:14,height:14}}
+                            onChange={e=>setAddRotForm(f=>({...f,assignedSites:e.target.checked?[...(f.assignedSites||[]),s.id]:(f.assignedSites||[]).filter(x=>x!==s.id)}))}/>
+                          <span style={{fontWeight:600,flex:1}}>{s.name}</span>
+                          <span className="badge b-info" style={{fontSize:9}}>{s.type}</span>
+                          <span className="tsm tmu" style={{fontSize:10}}>{s.region}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="field"><label>{t("Note initiale","ملاحظة أولية")}</label>
+                  <textarea className="fi" value={addRotForm.note} onChange={e=>setAddRotForm(f=>({...f,note:e.target.value}))} placeholder={t("Observations...","ملاحظات...")}/>
+                </div>
+                <div className="field">
+                  <label>{t("Régime TVA","نظام TVA")}</label>
+                  <div className="seg" style={{marginTop:6}}>
+                    <button className={`seg-btn${addRotForm.vatSubject===false?" active":""}`} onClick={()=>setAddRotForm(f=>({...f,vatSubject:false}))}>
+                      🚫 {t("Non assujetti à la TVA","غير خاضع للضريبة")}
+                    </button>
+                    <button className={`seg-btn${addRotForm.vatSubject===true?" active":""}`} onClick={()=>setAddRotForm(f=>({...f,vatSubject:true}))}>
+                      ✅ {t("Assujetti à la TVA","خاضع للضريبة")}
+                    </button>
+                  </div>
+                </div>
+                <div style={{background:"var(--s2)",border:"1px solid var(--bdr)",borderRadius:8,padding:"12px 14px"}}>
+                  <div style={{fontWeight:700,fontSize:12,marginBottom:8}}>📋 {t("Documents requis :","الوثائق المطلوبة:")}</div>
+                  {(addRotForm.clientType==="state"?(docTypes?.state||REQUIRED_DOCS_STATE):(docTypes?.private||REQUIRED_DOCS_PRIVATE)).map(d=>(
+                    <div key={d} className="fx aic g2" style={{marginBottom:5,fontSize:11,color:"var(--muted)"}}>
+                      <span style={{color:"var(--warn)"}}>⬜</span> {d}
+                    </div>
+                  ))}
+                </div>
+                <div className="field">
+                  <label>♻️ {t("Types de déchets autorisés","أنواع النفايات المسموحة")} <span style={{fontWeight:400,color:"var(--muted)",fontSize:10}}>({t("plusieurs choix possibles","اختيارات متعددة ممكنة")})</span></label>
+                  <div style={{display:"flex",flexDirection:"column",gap:4,marginTop:6}}>
+                    {(wasteTypes||[]).map(w=>{
+                      const checked=(addRotForm.allowedWasteTypes||[]).includes(w.id);
+                      return(
+                        <label key={w.id} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",padding:"7px 10px",borderRadius:6,border:`1px solid ${checked?"var(--g)":"var(--bdr)"}`,background:checked?"rgba(46,201,92,.07)":"transparent",fontSize:12,transition:"all .15s"}}>
+                          <input type="checkbox" checked={checked} style={{accentColor:"var(--g)",width:14,height:14}}
+                            onChange={e=>setAddRotForm(f=>({...f,allowedWasteTypes:e.target.checked?[...(f.allowedWasteTypes||[]),w.id]:(f.allowedWasteTypes||[]).filter(x=>x!==w.id)}))}/>
+                          <span style={{fontWeight:600,flex:1}}>♻️ {w.label}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="mf"><button className="btn bg" onClick={()=>setModal(false)}>{t("Annuler","إلغاء")}</button><button className="btn bp" style={{background:"var(--orange)",borderColor:"var(--orange)"}} disabled={!addRotForm.name} onClick={doAddRotationClient}>✓ {t("Créer le dossier rotations","إنشاء ملف الدوراني")}</button></div>
+          </div>
+        </div>
+      )}
+
+      {/* Add prepaid client modal */}
+      {modal==="add_prepaid"&&(
+        <div className="ov">
+          <div className="modal modal-lg">
+            <div className="mh"><span className="mh-title">🎫 {t("Nouveau client bonus prépayé","عميل مدفوع مسبقاً جديد")}</span><button className="btn bg bsm" onClick={()=>setModal(false)}>✕</button></div>
+            <div className="mb2">
+              <div className="alrt ai mb3" style={{marginBottom:16}}>
+                <span>ℹ️</span><span style={{fontSize:11}}>{t("Un client prépayé dispose d'un solde en DA préchargé par l'admin. Chaque décharge consomme ce solde. Le compte est actif immédiatement.","يمتلك العميل المدفوع مسبقاً رصيداً بالدينار الجزائري مشحوناً من قِبل الأدمن. كل تفريغ يستهلك من هذا الرصيد. الحساب نشط فوراً.")}</span>
+              </div>
+              <div className="fg" style={{gap:12}}>
+                <div className="fg fg2">
+                  <div className="field"><label>{t("Nom / Raison sociale *","الاسم / التسمية التجارية *")}</label>
+                    <input className="fi" value={prepaidForm.name} onChange={e=>setPrepaidForm(f=>({...f,name:e.target.value}))} placeholder={t("Nom du client","اسم العميل")}/>
+                  </div>
+                  <div className="field"><label>{t("Solde initial (DA) *","الرصيد الأولي (دج) *")}</label>
+                    <input className="fi" type="number" value={prepaidForm.balance} onChange={e=>setPrepaidForm(f=>({...f,balance:e.target.value}))} placeholder="200000"/>
+                  </div>
+                </div>
+                <div className="fg fg2">
+                  <div className="field"><label>{t("Téléphone","الهاتف")}</label>
+                    <input className="fi" value={prepaidForm.phone} onChange={e=>setPrepaidForm(f=>({...f,phone:e.target.value}))} placeholder="000 00 00 00"/>
+                  </div>
+                  <div className="field"><label>{t("Adresse","العنوان")}</label>
+                    <input className="fi" value={prepaidForm.address} onChange={e=>setPrepaidForm(f=>({...f,address:e.target.value}))} placeholder={t("Commune, wilaya","البلدية، الولاية")}/>
+                  </div>
+                </div>
+                <div className="field">
+                  <label>📍 {t("Centres d'enfouissement autorisés","مراكز الطمر المخوّلة")} <span style={{fontWeight:400,color:"var(--muted)",fontSize:10}}>({t("plusieurs choix possibles","اختيارات متعددة ممكنة")})</span></label>
+                  <div style={{display:"flex",flexDirection:"column",gap:4,marginTop:6}}>
+                    {(sites||[]).filter(s=>s.status==="active").map(s=>{
+                      const checked=(prepaidForm.assignedSites||[]).includes(s.id);
+                      return(
+                        <label key={s.id} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",padding:"7px 10px",borderRadius:6,border:`1px solid ${checked?"var(--g)":"var(--bdr)"}`,background:checked?"rgba(46,201,92,.07)":"transparent",fontSize:12,transition:"all .15s"}}>
+                          <input type="checkbox" checked={checked} style={{accentColor:"var(--g)",width:14,height:14}}
+                            onChange={e=>setPrepaidForm(f=>({...f,assignedSites:e.target.checked?[...(f.assignedSites||[]),s.id]:(f.assignedSites||[]).filter(x=>x!==s.id)}))}/>
+                          <span style={{fontWeight:600,flex:1}}>{s.name}</span>
+                          <span className="badge b-info" style={{fontSize:9}}>{s.type}</span>
+                          <span className="tsm tmu" style={{fontSize:10}}>{s.region}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="field"><label>{t("Note","ملاحظة")}</label>
+                  <textarea className="fi" value={prepaidForm.note} onChange={e=>setPrepaidForm(f=>({...f,note:e.target.value}))} placeholder={t("Observations...","ملاحظات...")}/>
+                </div>
+                <div className="field">
+                  <label>{t("Régime TVA","نظام TVA")}</label>
+                  <div className="seg" style={{marginTop:6}}>
+                    <button className={`seg-btn${prepaidForm.vatSubject===false?" active":""}`} onClick={()=>setPrepaidForm(f=>({...f,vatSubject:false}))}>
+                      🚫 {t("Non assujetti à la TVA","غير خاضع للضريبة")}
+                    </button>
+                    <button className={`seg-btn${prepaidForm.vatSubject===true?" active":""}`} onClick={()=>setPrepaidForm(f=>({...f,vatSubject:true}))}>
+                      ✅ {t("Assujetti à la TVA","خاضع للضريبة")}
+                    </button>
+                  </div>
+                </div>
+                <div style={{background:"var(--s2)",border:"1px solid var(--bdr)",borderRadius:8,padding:"12px 14px"}}>
+                  <div style={{fontWeight:700,fontSize:12,marginBottom:8}}>📋 {t("Pièces justificatives à fournir :","الوثائق الواجب تقديمها:")}</div>
+                  {(docTypes?.prepaid||REQUIRED_DOCS_PREPAID).map(d=>(
+                    <div key={d} className="fx aic g2" style={{marginBottom:5,fontSize:11,color:"var(--muted)"}}>
+                      <span style={{color:"var(--warn)"}}>⬜</span> {d}
+                    </div>
+                  ))}
+                </div>
+                <div className="field">
+                  <label>♻️ {t("Types de déchets autorisés","أنواع النفايات المسموحة")} <span style={{fontWeight:400,color:"var(--muted)",fontSize:10}}>({t("plusieurs choix possibles","اختيارات متعددة ممكنة")})</span></label>
+                  <div style={{display:"flex",flexDirection:"column",gap:4,marginTop:6}}>
+                    {(wasteTypes||[]).map(w=>{
+                      const checked=(prepaidForm.allowedWasteTypes||[]).includes(w.id);
+                      return(
+                        <label key={w.id} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",padding:"7px 10px",borderRadius:6,border:`1px solid ${checked?"var(--g)":"var(--bdr)"}`,background:checked?"rgba(46,201,92,.07)":"transparent",fontSize:12,transition:"all .15s"}}>
+                          <input type="checkbox" checked={checked} style={{accentColor:"var(--g)",width:14,height:14}}
+                            onChange={e=>setPrepaidForm(f=>({...f,allowedWasteTypes:e.target.checked?[...(f.allowedWasteTypes||[]),w.id]:(f.allowedWasteTypes||[]).filter(x=>x!==w.id)}))}/>
+                          <span style={{fontWeight:600,flex:1}}>♻️ {w.label}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="mf"><button className="btn bg" onClick={()=>setModal(false)}>{t("Annuler","إلغاء")}</button><button className="btn bp" disabled={!prepaidForm.name||!prepaidForm.balance} onClick={doPrepaidAdd}>✓ {t("Créer le compte prépayé","إنشاء الحساب المدفوع مسبقاً")}</button></div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit client profile modal */}
+      {modal==="edit_client"&&editClientForm&&(
+        <div className="ov">
+          <div className="modal modal-lg">
+            <div className="mh"><span className="mh-title">✏️ {t("Modifier le profil client","تعديل ملف العميل")}</span><button className="btn bg bsm" onClick={()=>{setModal(false);setEditClientForm(null);}}>✕</button></div>
+            <div className="mb2">
+              <div className="fg" style={{gap:12}}>
+                <div className="field"><label>{t("Nom / Raison sociale *","الاسم / التسمية التجارية *")}</label>
+                  <input className="fi" value={editClientForm.name} onChange={e=>setEditClientForm(f=>({...f,name:e.target.value}))}/>
+                </div>
+                <div className="fg fg2">
+                  <div className="field"><label>{t("Téléphone","الهاتف")}</label>
+                    <input className="fi" value={editClientForm.phone||""} onChange={e=>setEditClientForm(f=>({...f,phone:e.target.value}))}/>
+                  </div>
+                  <div className="field"><label>{t("Adresse","العنوان")}</label>
+                    <input className="fi" value={editClientForm.address||""} onChange={e=>setEditClientForm(f=>({...f,address:e.target.value}))}/>
+                  </div>
+                </div>
+                <div className="fg fg2">
+                  <div className="field"><label>NIF</label>
+                    <input className="fi" value={editClientForm.nif||""} onChange={e=>setEditClientForm(f=>({...f,nif:e.target.value}))} placeholder="099..."/>
+                  </div>
+                  <div className="field"><label>{t("Registre de Commerce","السجل التجاري")}</label>
+                    <input className="fi" value={editClientForm.rc||""} onChange={e=>setEditClientForm(f=>({...f,rc:e.target.value}))} placeholder="18/00-0000000B18"/>
+                  </div>
+                </div>
+                <div className="field">
+                  <label>{t("Régime TVA","نظام TVA")}</label>
+                  <div className="seg" style={{marginTop:6}}>
+                    <button className={`seg-btn${editClientForm.vatSubject===false?" active":""}`} onClick={()=>setEditClientForm(f=>({...f,vatSubject:false}))}>
+                      🚫 {t("Non assujetti à la TVA","غير خاضع للضريبة")}
+                    </button>
+                    <button className={`seg-btn${editClientForm.vatSubject===true?" active":""}`} onClick={()=>setEditClientForm(f=>({...f,vatSubject:true}))}>
+                      ✅ {t("Assujetti à la TVA","خاضع للضريبة")}
+                    </button>
+                  </div>
+                </div>
+                {editClientForm.type==="convention"&&(
+                  <>
+                    <div className="fg fg2">
+                      <div className="field"><label>{t("Fréquence de facturation","دورية الفوترة")}</label>
+                        <select className="fi" value={editClientForm.payFrequency||"monthly"} onChange={e=>setEditClientForm(f=>({...f,payFrequency:e.target.value}))}>
+                          <option value="monthly">📅 {t("Mensuelle","شهرية")}</option>
+                          <option value="annual">📆 {t("Annuelle","سنوية")}</option>
+                        </select>
+                      </div>
+                      <div className="field"><label>{t("Mode de paiement","طريقة الدفع")}</label>
+                        <select className="fi" value={editClientForm.payInstrument||"cheque"} onChange={e=>setEditClientForm(f=>({...f,payInstrument:e.target.value}))}>
+                          <option value="cheque">💳 {t("Chèque","شيك")}</option>
+                          <option value="bank">🏦 {t("Virement bancaire","تحويل بنكي")}</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div className="field">
+                      <label>🔄 {t("Quota de rotations","حصة الدورات")} <span style={{fontWeight:400,color:"var(--muted)",fontSize:10}}>({t("optionnel — 0 = pas de limite","اختياري — 0 = بلا حد")})</span></label>
+                      <input className="fi" type="number" step="1" min="0"
+                        value={editClientForm.rotationLimit||0}
+                        onChange={e=>setEditClientForm(f=>({...f,rotationLimit:parseInt(e.target.value)||0}))}
+                        placeholder="ex: 30"/>
+                    </div>
+                  </>
+                )}
+                {editClientForm.type==="prepaid"&&(
+                  <div className="field"><label>{t("Solde total (DA)","الرصيد الإجمالي (دج)")}</label>
+                    <input className="fi" type="number" value={editClientForm.creditLimit||0} onChange={e=>setEditClientForm(f=>({...f,creditLimit:parseFloat(e.target.value)||0}))}/>
+                  </div>
+                )}
+                {editClientForm.type==="rotation"&&(
+                  <div className="fg fg2">
+                    <div className="field">
+                      <label>{t("Périodicité du quota","دورية الحصة")}</label>
+                      <select className="fi" value={editClientForm.payFrequency||"monthly"} onChange={e=>setEditClientForm(f=>({...f,payFrequency:e.target.value}))}>
+                        <option value="monthly">🗓 {t("Mensuelle (rotations/mois)","شهرية (دورة/شهر)")}</option>
+                        <option value="annual">📅 {t("Annuelle (rotations/an)","سنوية (دورة/سنة)")}</option>
+                      </select>
+                    </div>
+                    <div className="field">
+                      <label>{t("Quota de rotations","حصة الدورات")} {editClientForm.payFrequency==="annual"?t("(rotations/an)","(دورة/سنة)"):t("(rotations/mois)","(دورة/شهر)")}</label>
+                      <input className="fi" type="number" step="1" min="0"
+                        value={editClientForm.weightLimitYear||0}
+                        onChange={e=>setEditClientForm(f=>({...f,weightLimitYear:parseInt(e.target.value)||0}))}
+                        placeholder={editClientForm.payFrequency==="annual"?"ex: 360":"ex: 30"}/>
+                    </div>
+                  </div>
+                )}
+                <div className="field">
+                  <label>📍 {t("Centres d'enfouissement autorisés","مراكز الطمر المخوّلة")} <span style={{fontWeight:400,color:"var(--muted)",fontSize:10}}>({t("admin — plusieurs choix","أدمن — اختيارات متعددة")})</span></label>
+                  <div style={{display:"flex",flexDirection:"column",gap:4,marginTop:6}}>
+                    {(sites||[]).filter(s=>s.status==="active").map(s=>{
+                      const checked=(editClientForm.assignedSites||[]).includes(s.id);
+                      return(
+                        <label key={s.id} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",padding:"7px 10px",borderRadius:6,border:`1px solid ${checked?"var(--g)":"var(--bdr)"}`,background:checked?"rgba(46,201,92,.07)":"transparent",fontSize:12,transition:"all .15s"}}>
+                          <input type="checkbox" checked={checked} style={{accentColor:"var(--g)",width:14,height:14}}
+                            onChange={e=>setEditClientForm(f=>({...f,assignedSites:e.target.checked?[...(f.assignedSites||[]),s.id]:(f.assignedSites||[]).filter(x=>x!==s.id)}))}/>
+                          <span style={{fontWeight:600,flex:1}}>{s.name}</span>
+                          <span className="badge b-info" style={{fontSize:9}}>{s.type}</span>
+                          <span className="tsm tmu" style={{fontSize:10}}>{s.region}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="field"><label>{t("Note","ملاحظة")}</label>
+                  <textarea className="fi" value={editClientForm.note||""} onChange={e=>setEditClientForm(f=>({...f,note:e.target.value}))} rows={2}/>
+                </div>
+                {isAdmin&&(
+                  <>
+                    <hr className="dvdr"/>
+                    <div className="field">
+                      <label>🚛 {t("Type de service CETManager","نوع الخدمة CETManager")} <span style={{fontWeight:400,color:"var(--muted)",fontSize:10}}>(admin)</span></label>
+                      <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:8}}>
+                        <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13}}>
+                          <input type="checkbox" checked={editClientForm.serviceType==="treatment_only"||editClientForm.serviceType==="both"}
+                            onChange={e=>{
+                              const hasCollect = editClientForm.serviceType==="treat_and_collect"||editClientForm.serviceType==="both";
+                              const hasTraitement = e.target.checked;
+                              setEditClientForm(f=>({...f,serviceType:hasTraitement&&hasCollect?"both":hasTraitement?"treatment_only":hasCollect?"treat_and_collect":"treatment_only"}));
+                            }}/>
+                          🏭 {t("Traitement","المعالجة")}
+                        </label>
+                        <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13}}>
+                          <input type="checkbox" checked={editClientForm.serviceType==="treat_and_collect"||editClientForm.serviceType==="both"}
+                            onChange={e=>{
+                              const hasTraitement = editClientForm.serviceType==="treatment_only"||editClientForm.serviceType==="both";
+                              const hasCollect = e.target.checked;
+                              setEditClientForm(f=>({...f,serviceType:hasTraitement&&hasCollect?"both":hasCollect?"treat_and_collect":hasTraitement?"treatment_only":"treatment_only"}));
+                            }}/>
+                          🚛 {t("Collecte et Traitement","الجمع والمعالجة")}
+                        </label>
+                      </div>
+                    </div>
+                    {(editClientForm.serviceType==="treat_and_collect"||editClientForm.serviceType==="both")&&(
+                      <div className="field">
+                        <label>{t("Mode de facturation pour la collecte","طريقة فوترة الجمع")}</label>
+                        <div className="seg" style={{marginTop:6}}>
+                          <button className={`seg-btn${editClientForm.collectBillingMode!=="rotation"?" active":""}`}
+                            onClick={()=>setEditClientForm(f=>({...f,collectBillingMode:"tonnage"}))}>
+                            ⚖️ {t("Tonnage (prix/tonne)","طنية (سعر/طن)")}
+                          </button>
+                          <button className={`seg-btn${editClientForm.collectBillingMode==="rotation"?" active":""}`}
+                            onClick={()=>setEditClientForm(f=>({...f,collectBillingMode:"rotation"}))}
+                            style={editClientForm.collectBillingMode==="rotation"?{background:"var(--orange)",borderColor:"var(--orange)",color:"#fff"}:{}}>
+                            🔄 {t("Rotation (prix fixe/passage)","دوراني (سعر ثابت/مرور)")}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    <div className="field">
+                      <label>♻️ {t("Types de déchets autorisés","أنواع النفايات المسموحة")} <span style={{fontWeight:400,color:"var(--muted)",fontSize:10}}>({t("plusieurs choix possibles","اختيارات متعددة ممكنة")})</span></label>
+                      <div style={{display:"flex",flexDirection:"column",gap:4,marginTop:6}}>
+                        {(wasteTypes||[]).length===0&&<span style={{fontSize:11,color:"var(--muted)"}}>{t("Aucun type de déchet configuré.","لم يُهيأ أي نوع نفايات.")}</span>}
+                        {(wasteTypes||[]).map(w=>{
+                          const checked=(editClientForm.allowedWasteTypes||[]).includes(w.id);
+                          return(
+                            <label key={w.id} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",padding:"7px 10px",borderRadius:6,border:`1px solid ${checked?"var(--g)":"var(--bdr)"}`,background:checked?"rgba(46,201,92,.07)":"transparent",fontSize:12,transition:"all .15s"}}>
+                              <input type="checkbox" checked={checked} style={{accentColor:"var(--g)",width:14,height:14}}
+                                onChange={e=>setEditClientForm(f=>({...f,allowedWasteTypes:e.target.checked?[...(f.allowedWasteTypes||[]),w.id]:(f.allowedWasteTypes||[]).filter(x=>x!==w.id)}))}/>
+                              <span style={{fontWeight:600,flex:1}}>♻️ {w.label}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+            <div className="mf"><button className="btn bg" onClick={()=>{setModal(false);setEditClientForm(null);}}>{t("Annuler","إلغاء")}</button><button className="btn bp" disabled={!editClientForm.name} onClick={doEditClient}>✓ {t("Enregistrer","حفظ")}</button></div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   OPERATORS
+═══════════════════════════════════════════════════════════════════════════ */
+function PageOperators({users,sites,addUser,updateUser,deleteUser,authUser}) {
+  const t = useT();
+  const [modal,     setModal]     = useState(false);
+  const [editOp,    setEditOp]    = useState(null);
+  const [editForm,  setEditForm]  = useState({name:"",email:"",password:"",phone:"",matricule:"",siteId:"CET-JIJ"});
+  const [form,      setForm]      = useState({name:"",email:"",password:"",phone:"",matricule:"",siteId:"CET-JIJ"});
+  const [tab,       setTab]       = useState("active");
+  const [codes,     setCodes]     = useState({});
+  const set    = (k,v) => setForm(f=>({...f,[k]:v}));
+  const setEd  = (k,v) => setEditForm(f=>({...f,[k]:v}));
+
+  const operators = users.filter(u=>u.role==="operator");
+  const pendingOps = operators.filter(u=>u.status==="pending");
+  const activeOps  = operators.filter(u=>u.status!=="pending");
+
+  const handleAdd = async () => {
+    if (!form.name||!form.email||!form.password) return;
+    const u = {
+      id:uidU(), name:form.name, email:form.email, password:form.password, role:"operator",
+      status:"active", phone:form.phone, matricule:form.matricule||`OP-${new Date().getFullYear()}-${String(operators.length+1).padStart(3,"0")}`,
+      siteId:form.siteId, createdAt:new Date().toISOString().slice(0,10),
+    };
+    const data = await addUser(u);
+    if (data?.verificationCode) setCodes(c=>({...c,[u.id]:data.verificationCode}));
+    setModal(false);
+    setForm({name:"",email:"",password:"",phone:"",matricule:"",siteId:"CET-JIJ"});
+  };
+
+  const regenerateCode = async (u) => {
+    const res = await apiFetch(`/api/users/${u.id}/regenerate-code`,{method:'POST'});
+    const data = await res.json();
+    if (data.verificationCode) setCodes(c=>({...c,[u.id]:data.verificationCode}));
+  };
+
+  const copyCode = (code) => {
+    navigator.clipboard.writeText(code).catch(()=>{});
+  };
+
+  const toggleStatus = u => updateUser({...u, status:u.status==="active"?"inactive":u.status==="inactive"?"active":u.status});
+  const approveOp    = u => updateUser({...u, status:"active", matricule:`OP-${new Date().getFullYear()}-${String(operators.length).padStart(3,"0")}`});
+  const rejectOp     = u => updateUser({...u, status:"inactive"});
+
+  const siteLabel = sid => sites.find(s=>s.id===sid)?.name || sid;
+
+  return (
+    <>
+      <div className="fx aic jsb mb4">
+        <div className="tabs" style={{margin:0}}>
+          <button className={`tab${tab==="active"?" active":""}`} onClick={()=>setTab("active")}>
+            {t("Opérateurs","العمال")} ({activeOps.length})
+          </button>
+          <button className={`tab${tab==="pending"?" active":""}`} onClick={()=>setTab("pending")}>
+            {t("Demandes en attente","الطلبات المعلقة")} {pendingOps.length>0&&<span className="badge b-warn" style={{marginLeft:6,fontSize:8}}>{pendingOps.length}</span>}
+          </button>
+        </div>
+        <button className="btn bp bsm" onClick={()=>setModal(true)}>➕<span className="btn-lbl"> {t("Nouvel opérateur","عامل جديد")}</span></button>
+      </div>
+
+      {tab==="active"&&(
+        <>
+          {/* Admin card */}
+          <div style={{marginBottom:16}}>
+            <div className="nav-lbl" style={{padding:"0 0 8px"}}>{t("Administrateur","المدير")}</div>
+            {users.filter(u=>u.role==="admin").map(u=>(
+              <div key={u.id} className="op-card" style={{display:"flex",gap:14,alignItems:"flex-start",marginBottom:8}}>
+                <div className="op-avatar op-av-admin">👔</div>
+                <div style={{flex:1}}>
+                  <div className="fx aic jsb">
+                    <div style={{fontWeight:700,fontSize:14}}>{u.name}</div>
+                    <UserStatusBadge s={u.status}/>
+                  </div>
+                  <div className="mn tsm tmu mt1">{u.email}</div>
+                  <div className="fx aic g3 mt2">
+                    <span className="tsm tmu">📞 {u.phone}</span>
+                    <span className="tsm tmu">🏭 {t("Tous les sites","كل المواقع")}</span>
+                    <span className="mn tsm tmu">{u.matricule}</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="nav-lbl" style={{padding:"0 0 8px"}}>{t("Agents de poste","عمال المناوبة")}</div>
+          <div className="op-grid">
+            {activeOps.length===0?(
+              <div className="card" style={{color:"var(--muted)",textAlign:"center",padding:32}}>{t("Aucun opérateur actif","لا يوجد عامل نشط")}</div>
+            ):activeOps.map(u=>(
+              <div key={u.id} className="op-card">
+                <div className="fx aic jsb mb3">
+                  <div className="fx aic g2">
+                    <div className="op-avatar op-av-op">🦺</div>
+                    <div>
+                      <div style={{fontWeight:700,fontSize:13}}>{u.name}</div>
+                      <div className="mn tsm tmu">{u.matricule||"—"}</div>
+                    </div>
+                  </div>
+                  <UserStatusBadge s={u.status}/>
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:5,fontSize:12,marginBottom:12}}>
+                  <div className="fx aic g2">
+                    <span>📧</span><span className="tmu truncate">{u.email}</span>
+                    {u.emailVerified
+                      ? <span className="badge b-ok" style={{fontSize:9,marginLeft:2}}>✓ {t("vérifié","موثق")}</span>
+                      : <span className="badge b-warn" style={{fontSize:9,marginLeft:2}}>{t("non vérifié","غير موثق")}</span>
+                    }
+                  </div>
+                  <div className="fx aic g2"><span>📞</span><span className="tmu">{u.phone||"—"}</span></div>
+                  <div className="fx aic g2"><span>🏭</span><span className="tmu">{siteLabel(u.siteId)}</span></div>
+                  <div className="fx aic g2"><span>📅</span><span className="tmu">{u.createdAt}</span></div>
+                </div>
+                {u.id !== authUser.id && (
+                  <div className="fx g2">
+                    <button className="btn bg bsm" style={{flex:1}} onClick={()=>{setEditOp(u);setEditForm({name:u.name,email:u.email,password:"",phone:u.phone||"",matricule:u.matricule||"",siteId:u.siteId||"CET-JIJ"});}}>
+                      ✏️ {t("Modifier","تعديل")}
+                    </button>
+                    <button className={`btn bsm ${u.status==="active"?"be":"bp"}`}
+                      onClick={()=>toggleStatus(u)}>
+                      {u.status==="active"?"🔒":"🔓"}
+                    </button>
+                    <button className="btn bg bsm" title={t("Supprimer","حذف")}
+                      onClick={()=>{ if(window.confirm(t(`Supprimer l'opérateur ${u.name} ?`,`حذف العامل ${u.name}؟`))) deleteUser(u.id); }}>
+                      🗑
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {tab==="pending"&&(
+        pendingOps.length===0?(
+          <div className="card" style={{color:"var(--muted)",textAlign:"center",padding:40}}>
+            <div style={{fontSize:32,marginBottom:10}}>✅</div>
+            <div>{t("Aucune demande en attente","لا توجد طلبات معلقة")}</div>
+          </div>
+        ):(
+          <div className="op-grid">
+            {pendingOps.map(u=>{
+              const code = codes[u.id] || u.verificationCode;
+              return (
+              <div key={u.id} className="op-card">
+                <div className="fx aic jsb mb3">
+                  <div className="fx aic g2">
+                    <div className="op-avatar op-av-op">👤</div>
+                    <div>
+                      <div style={{fontWeight:700,fontSize:13}}>{u.name}</div>
+                      <span className="badge b-warn">{t("En attente","قيد الانتظار")}</span>
+                    </div>
+                  </div>
+                  {u.emailVerified
+                    ? <span className="badge b-ok" style={{fontSize:9}}>✓ {t("e-mail vérifié","بريد موثق")}</span>
+                    : <span className="badge b-warn" style={{fontSize:9}}>{t("e-mail non vérifié","بريد غير موثق")}</span>
+                  }
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:5,fontSize:12,marginBottom:12}}>
+                  <div className="fx aic g2"><span>📧</span><span className="tmu truncate">{u.email}</span></div>
+                  <div className="fx aic g2"><span>📞</span><span className="tmu">{u.phone||"—"}</span></div>
+                  <div className="fx aic g2"><span>🏭</span><span className="tmu">{t("Demandé:","مطلوب:")} {siteLabel(u.siteId)}</span></div>
+                  <div className="fx aic g2"><span>📅</span><span className="tmu">{u.createdAt}</span></div>
+                </div>
+                {!u.emailVerified && (
+                  <div style={{background:"rgba(46,204,88,.07)",border:"1px solid rgba(46,204,88,.25)",borderRadius:8,padding:"10px 12px",marginBottom:10}}>
+                    <div style={{fontSize:10,color:"var(--g)",marginBottom:6,fontWeight:600}}>🔑 {t("CODE DE VÉRIFICATION (à communiquer à l'opérateur)","رمز التحقق (يُسلَّم للعامل)")}</div>
+                    <div className="fx aic g2">
+                      <span style={{fontFamily:"monospace",fontSize:22,fontWeight:800,letterSpacing:6,color:"var(--g)"}}>
+                        {code||"—"}
+                      </span>
+                      {code&&<button className="btn bg bsm" title={t("Copier","نسخ")} onClick={()=>copyCode(code)}>📋</button>}
+                      <button className="btn bg bsm" title={t("Nouveau code","رمز جديد")} onClick={()=>regenerateCode(u)}>🔄</button>
+                    </div>
+                  </div>
+                )}
+                <div className="fg fg2">
+                  <button className="btn bp bsm" onClick={()=>approveOp(u)}>✓ {t("Approuver","قبول")}</button>
+                  <button className="btn be bsm" onClick={()=>rejectOp(u)}>✗ {t("Refuser","رفض")}</button>
+                </div>
+              </div>
+              );
+            })}
+          </div>
+        )
+      )}
+
+      {/* Add operator modal */}
+      {modal&&(
+        <div className="ov">
+          <div className="modal modal-lg">
+            <div className="mh"><span className="mh-title">➕ {t("Créer un compte opérateur","إنشاء حساب عامل")}</span><button className="btn bg bsm" onClick={()=>setModal(false)}>✕</button></div>
+            <div className="mb2">
+              <div className="fg" style={{gap:14}}>
+                <div className="fg fg2">
+                  <div className="field"><label>{t("Nom complet *","الاسم الكامل *")}</label>
+                    <input className="fi" value={form.name} onChange={e=>set("name",e.target.value)} placeholder={t("Prénom Nom","الاسم واللقب")}/>
+                  </div>
+                  <div className="field"><label>{t("Matricule","الرقم الوظيفي")}</label>
+                    <input className="fi" value={form.matricule} onChange={e=>set("matricule",e.target.value)} placeholder={`OP-${new Date().getFullYear()}-00${operators.length+1}`}/>
+                  </div>
+                </div>
+                <div className="fg fg2">
+                  <div className="field"><label>{t("Adresse e-mail *","البريد الإلكتروني *")}</label>
+                    <input className="fi" type="email" value={form.email} onChange={e=>set("email",e.target.value)} placeholder="prenom.nom@demo-cet.dz"/>
+                  </div>
+                  <div className="field"><label>{t("Téléphone","الهاتف")}</label>
+                    <input className="fi" value={form.phone} onChange={e=>set("phone",e.target.value)} placeholder="000 00 00 00"/>
+                  </div>
+                </div>
+                <div className="fg fg2">
+                  <div className="field"><label>{t("Site d'affectation","الموقع المُعيَّن إليه")}</label>
+                    <select className="fi" value={form.siteId} onChange={e=>set("siteId",e.target.value)}>
+                      {sites.map(s=><option key={s.id} value={s.id}>{s.name} — {s.region}</option>)}
+                    </select>
+                  </div>
+                  <div className="field"><label>{t("Mot de passe temporaire *","كلمة مرور مؤقتة *")}</label>
+                    <input className="fi" type="password" value={form.password} onChange={e=>set("password",e.target.value)} placeholder={t("Min. 6 caractères","6 أحرف على الأقل")}/>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="mf">
+              <button className="btn bg" onClick={()=>setModal(false)}>{t("Annuler","إلغاء")}</button>
+              <button className="btn bp" disabled={!form.name||!form.email||!form.password} onClick={handleAdd}>✓ {t("Créer le compte","إنشاء الحساب")}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit operator modal */}
+      {editOp&&(
+        <div className="ov">
+          <div className="modal modal-lg">
+            <div className="mh"><span className="mh-title">✏️ {t("Modifier l'opérateur","تعديل العامل")}</span><button className="btn bg bsm" onClick={()=>setEditOp(null)}>✕</button></div>
+            <div className="mb2">
+              <div className="fg" style={{gap:14}}>
+                <div className="fg fg2">
+                  <div className="field"><label>{t("Nom complet *","الاسم الكامل *")}</label>
+                    <input className="fi" value={editForm.name} onChange={e=>setEd("name",e.target.value)}/>
+                  </div>
+                  <div className="field"><label>{t("Matricule","الرقم الوظيفي")}</label>
+                    <input className="fi" value={editForm.matricule} onChange={e=>setEd("matricule",e.target.value)}/>
+                  </div>
+                </div>
+                <div className="fg fg2">
+                  <div className="field"><label>{t("Adresse e-mail *","البريد الإلكتروني *")}</label>
+                    <input className="fi" type="email" value={editForm.email} onChange={e=>setEd("email",e.target.value)}/>
+                  </div>
+                  <div className="field"><label>{t("Téléphone","الهاتف")}</label>
+                    <input className="fi" value={editForm.phone} onChange={e=>setEd("phone",e.target.value)}/>
+                  </div>
+                </div>
+                <div className="fg fg2">
+                  <div className="field"><label>{t("Site d'affectation","الموقع المُعيَّن إليه")}</label>
+                    <select className="fi" value={editForm.siteId} onChange={e=>setEd("siteId",e.target.value)}>
+                      {sites.map(s=><option key={s.id} value={s.id}>{s.name} — {s.region}</option>)}
+                    </select>
+                  </div>
+                  <div className="field"><label>{t("Nouveau mot de passe (laisser vide = inchangé)","كلمة مرور جديدة (اتركها فارغة = بدون تغيير)")}</label>
+                    <input className="fi" type="password" value={editForm.password} onChange={e=>setEd("password",e.target.value)} placeholder={t("Laisser vide pour ne pas changer","اترك فارغاً للإبقاء على نفس كلمة المرور")}/>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="mf">
+              <button className="btn bg" onClick={()=>setEditOp(null)}>{t("Annuler","إلغاء")}</button>
+              <button className="btn bp" disabled={!editForm.name||!editForm.email} onClick={()=>{
+                updateUser({...editOp,name:editForm.name,email:editForm.email,password:editForm.password||"",phone:editForm.phone,matricule:editForm.matricule,siteId:editForm.siteId});
+                setEditOp(null);
+              }}>✓ {t("Enregistrer","حفظ")}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+function amountToWords(amount) {
+  const rounded = Math.round(amount * 100);
+  const din = Math.floor(rounded / 100);
+  const cts = rounded % 100;
+  const ONES = ['','UN','DEUX','TROIS','QUATRE','CINQ','SIX','SEPT','HUIT','NEUF',
+    'DIX','ONZE','DOUZE','TREIZE','QUATORZE','QUINZE','SEIZE','DIX-SEPT','DIX-HUIT','DIX-NEUF'];
+  function w(n) {
+    if (!n) return '';
+    if (n <= 19) return ONES[n];
+    if (n <= 69) {
+      const t=Math.floor(n/10), o=n%10;
+      const ts=['','','VINGT','TRENTE','QUARANTE','CINQUANTE','SOIXANTE'][t];
+      if (!o) return ts;
+      if (o===1 && t!==8) return ts+'-ET-UN';
+      return ts+'-'+ONES[o];
+    }
+    if (n <= 79) { const o=n-60; return o===11?'SOIXANTE-ET-ONZE':'SOIXANTE-'+ONES[o]; }
+    if (n <= 99) { const o=n-80; return o?'QUATRE-VINGT-'+ONES[o]:'QUATRE-VINGTS'; }
+    if (n <= 199) { const r=n-100; return 'CENT'+(r?' '+w(r):''); }
+    if (n <= 999) { const h=Math.floor(n/100),r=n%100; return ONES[h]+' CENT'+(r?' '+w(r):'S'); }
+    if (n <= 1999) { const r=n-1000; return 'MILLE'+(r?' '+w(r):''); }
+    if (n <= 999999) { const th=Math.floor(n/1000),r=n%1000; return w(th)+' MILLE'+(r?' '+w(r):''); }
+    const m=Math.floor(n/1e6),r=n%1e6; return w(m)+(m>1?' MILLIONS':' MILLION')+(r?' '+w(r):'');
+  }
+  let s=(din?w(din):'ZÉRO')+' DINAR'+(din>1?'S':'');
+  if (cts) s+=' ET '+w(cts)+' CENTIME'+(cts>1?'S':'');
+  return s;
+}
+
+function generateOfficialBillHTML(c, entries, company, month, invNum, wasteTypes, opts = {}) {
+  const fB = n => new Intl.NumberFormat('fr-FR',{minimumFractionDigits:3,maximumFractionDigits:3}).format(n);
+  const fQ = n => new Intl.NumberFormat('fr-FR',{minimumFractionDigits:3,maximumFractionDigits:3}).format(n);
+  const TVA = c.vatSubject ? 19 : 0;
+  // Group by opType + wasteType + billingMode so Traitement and Collecte et Traitement appear as separate lines
+  const groups = {};
+  entries.forEach(d => {
+    const opT  = d.opType === 'collect' ? 'collect' : 'treatment';
+    const isRot = d.payMethod === 'rotation';
+    const key = `${opT}__${d.wasteType}__${isRot ? 'rotation' : 'tonnage'}__${d.unitPrice}`;
+    if (!groups[key]) groups[key] = {opType:opT, wasteType:d.wasteType, isRotation:isRot, count:0, net:0, total:0, unitPrice:d.unitPrice};
+    groups[key].count += 1;
+    groups[key].net   += d.net;
+    groups[key].total += d.total;
+  });
+  const rows = opts.precomputedRows
+    ? opts.precomputedRows.map((r, i) => ({...r, num: i+1, tva: TVA}))
+    : Object.values(groups).map((g,i)=>({
+        num: i+1,
+        opType: g.opType,
+        label: `${g.opType==='collect'?'Collecte et Traitement — ':'Traitement — '}${wasteTypes.find(w=>w.id===g.wasteType)?.label || g.wasteType}`,
+        isRotation: g.isRotation,
+        qty: g.isRotation ? g.count : g.net,
+        unitPrice: g.unitPrice,
+        tva: TVA,
+        ht: g.total,
+      }));
+  const totalHT  = rows.reduce((s,r)=>s+r.ht, 0);
+  const totalTVA = totalHT * TVA / 100;
+  const totalTTC = totalHT + totalTVA;
+  const hasTonnage  = rows.some(r=>!r.isRotation);
+  const hasRotation = rows.some(r=>r.isRotation);
+  const totalTonnes = rows.filter(r=>!r.isRotation).reduce((s,r)=>s+r.qty, 0);
+  const totalRots   = rows.filter(r=>r.isRotation).reduce((s,r)=>s+r.qty, 0);
+  const totalQtyDisplay = (hasTonnage && hasRotation)
+    ? `${fQ(totalTonnes)} t + ${totalRots} rot.`
+    : hasRotation ? `${totalRots} rotation${totalRots>1?'s':''}` : `${fQ(totalTonnes)} t`;
+  const date = new Date().toLocaleDateString('fr-DZ');
+  const co = f => (Array.isArray(company)?company:COMPANY_FIELDS_DEFAULT).find(x=>x.id===f)?.value||'';
+  const rowsHTML = rows.map(r=> r.isCredit ? `
+    <tr style="color:#16a34a;">
+      <td style="text-align:center;">—</td>
+      <td><em>${r.label}</em></td>
+      <td style="text-align:center;">—</td>
+      <td style="text-align:center;">—</td>
+      <td style="text-align:center;">—</td>
+      <td style="text-align:right;">− ${fB(-r.ht)}</td>
+    </tr>` : `
+    <tr>
+      <td style="text-align:center;">${r.num}</td>
+      <td><strong>${r.label}</strong></td>
+      <td style="text-align:right;">${r.isRotation ? r.qty+' rot.' : fQ(r.qty)+' t'}</td>
+      <td style="text-align:right;">${fB(r.unitPrice)}&nbsp;/&nbsp;${r.isRotation ? 'rot.' : 't'}</td>
+      <td style="text-align:center;">${r.tva}%</td>
+      <td style="text-align:right;">${fB(r.ht)}</td>
+    </tr>`).join('');
+  return `<!DOCTYPE html>
+<html xmlns:o='urn:schemas-microsoft-com:office:office'
+      xmlns:w='urn:schemas-microsoft-com:office:word'
+      xmlns='http://www.w3.org/TR/REC-html40' lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<title>Facture ${invNum}</title>
+<!--[if gte mso 9]><xml>
+<w:WordDocument>
+  <w:View>Print</w:View>
+  <w:Zoom>100</w:Zoom>
+  <w:DoNotOptimizeForBrowser/>
+</w:WordDocument>
+</xml><![endif]-->
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#000}
+  table{border-collapse:collapse;width:100%}
+  th,td{border:1px solid #000;padding:6px 10px}
+  th{background:#f0f0f0;font-weight:bold;text-align:center;font-size:13px}
+  .nb td,.nb th{border:none;padding:3px 5px}
+  .sep{border-top:2.5px solid #000;margin:6px 0}
+  .sep2{border-top:1px solid #000;margin:5px 0}
+  .r{text-align:right}.c{text-align:center}.b{font-weight:bold}
+  @page WordSection1{size:21.0cm 29.7cm;margin:1.5cm 1.8cm;mso-page-orientation:portrait}
+  @page{size:21.0cm 29.7cm;margin:1.5cm 1.8cm}
+  div.WordSection1{page:WordSection1}
+  @media print{body{padding:0} .WordSection1{padding-bottom:32px}}
+</style>
+</head>
+<body>
+<div class="WordSection1">
+
+<!-- ── HEADER TOP: Arabic centered ── -->
+<div style="text-align:center;font-size:15px;font-weight:bold;direction:rtl;font-family:'Traditional Arabic',Arial,sans-serif;margin-bottom:8px;color:#000">
+  الجمهورية الجزائرية الديموقراطية الشعبية
+</div>
+
+<!-- ── HEADER: French LEFT | Logo RIGHT ── -->
+<table class="nb" style="width:100%;margin-bottom:6px">
+  <tr>
+    <!-- LEFT: French company details -->
+    <td style="border:none;vertical-align:top;width:70%">
+      <div style="font-size:12px;line-height:2;color:#000">
+        <div style="font-size:13.5px;font-weight:bold;margin-bottom:4px">
+          Établissement Public de Gestion des Centres d'Enfouissement Technique (Démo)
+        </div>
+        <div>Cité Administrative, 01ème Étage, Zone Démo — Démo</div>
+        <div>IF&nbsp;: 000918044299126 &nbsp;·&nbsp; RC&nbsp;: 18/000442991H09</div>
+        <div>Tél&nbsp;: 000 00 00 00 &nbsp;·&nbsp; Fax&nbsp;: 000 00 00 00</div>
+        <div>BNQ&nbsp;: BADR Démo — [N° compte]</div>
+      </div>
+    </td>
+    <!-- RIGHT: Official Logo -->
+    <td style="border:none;text-align:right;vertical-align:middle;width:30%">
+      <img src="/logo.png" alt="CETManager" style="width:90px;height:90px;object-fit:contain"/>
+    </td>
+  </tr>
+</table>
+
+<div class="sep"></div>
+
+<!-- ── INVOICE REFERENCE LINE ── -->
+<div style="display:flex;justify-content:space-between;padding:6px 2px;font-weight:bold;font-size:13.5px">
+  <span>${opts.isDebt ? 'AVIS DE DÉBIT — SOLDE RESTANT DÛ' : 'FACTURE CLIENT'} : ${invNum}</span>
+  <span>DÉMO, LE : ${date}</span>
+</div>
+${opts.isDebt ? '<div style="margin:4px 2px 0;font-size:11px;color:#c00;font-weight:bold;letter-spacing:.03em">⚠ Ce document concerne uniquement les prestations non encore réglées.</div>' : ''}
+
+<div class="sep"></div>
+
+<!-- ── CLIENT BLOCK (left-aligned) ── -->
+<div style="margin:10px 2px 14px;font-size:12.5px;line-height:1.9">
+  <div style="font-weight:bold;font-size:13px;margin-bottom:3px">${opts.isDebt ? 'AVIS DE DÉBIT ADRESSÉ À :' : 'FACTURÉ À :'}</div>
+  <div>${c.id} — ${c.name}</div>
+  ${c.nif    ? `<div>M.F.&nbsp;: ${c.nif}</div>` : ''}
+  ${c.rc     ? `<div>R.C.&nbsp;: ${c.rc}</div>`  : ''}
+  ${c.address? `<div>${c.address}</div>`           : ''}
+  <div style="margin-top:4px;font-size:11.5px;color:#555">
+    Régime TVA&nbsp;: ${TVA > 0 ? `Assujetti — ${TVA}%` : 'Non assujetti (exonéré)'}
+  </div>
+</div>
+
+<!-- ── ITEMS TABLE ── -->
+<table>
+  <thead>
+    <tr>
+      <th style="width:36px">N°</th>
+      <th style="text-align:left;padding-left:10px">DÉSIGNATION</th>
+      <th style="width:100px">QUANTITÉ</th>
+      <th style="width:110px">PRIX U. (DA)</th>
+      <th style="width:64px">% TVA</th>
+      <th style="width:110px">MONTANT HT</th>
+    </tr>
+  </thead>
+  <tbody>
+    ${rowsHTML}
+    <tr style="background:#f5f5f5">
+      <td colspan="2" class="b" style="font-size:13px">TOTAL GÉNÉRAL (${rows.length} ligne${rows.length>1?'s':''})</td>
+      <td class="c" style="color:#999;font-size:11px">—</td>
+      <td></td><td></td>
+      <td class="r b">${fB(totalHT)}</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- ── AMOUNT IN WORDS ── -->
+${(()=>{const alreadyPaid=opts.alreadyPaid||0;const netAPayer=alreadyPaid>0?Math.max(0,totalTTC-alreadyPaid):totalTTC;return`<div style="margin-top:10px;border:1px solid #000;padding:7px 12px;font-size:12px">
+  <strong>${opts.isDebt ? 'Arrêté le présent avis de débit à la somme de :' : 'Arrêtée la présente facture à la somme de :'}</strong><br>
+  <span style="font-weight:bold;text-transform:uppercase;letter-spacing:.02em">${amountToWords(netAPayer)}</span>
+</div>
+
+<!-- ── TVA SUMMARY + TOTALS ── -->
+<div style="display:flex;gap:16px;margin-top:12px;align-items:flex-start">
+  <table style="width:46%">
+    <thead>
+      <tr><th>TVA %</th><th>BASE HT</th><th>MONTANT TVA</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="c">${TVA > 0 ? TVA+',00 %' : 'Exonéré'}</td>
+        <td class="r">${fB(totalHT)}</td>
+        <td class="r">${fB(totalTVA)}</td>
+      </tr>
+      <tr class="b">
+        <td class="c b">TOTAL</td>
+        <td class="r b">${fB(totalHT)}</td>
+        <td class="r b">${fB(totalTVA)}</td>
+      </tr>
+    </tbody>
+  </table>
+  <table style="width:52%;margin-left:auto">
+    <tbody>
+      <tr><td style="width:58%">Montant H.T.</td><td class="r">${fB(totalHT)}</td></tr>
+      <tr><td>T.V.A. (${TVA}%)</td><td class="r">${fB(totalTVA)}</td></tr>
+      <tr><td>Montant T.T.C.</td><td class="r">${fB(totalTTC)}</td></tr>
+      <tr style="background:#e8e8e8">
+        <td class="b" style="font-size:14px">NET À PAYER</td>
+        <td class="r b" style="font-size:15px">${fB(netAPayer)}</td>
+      </tr>
+    </tbody>
+  </table>
+</div>`;})()}
+
+<!-- ── SIGNATURE ── -->
+<div style="margin-top:48px;display:flex;justify-content:flex-start;padding-left:8%">
+  <div style="text-align:center;min-width:200px">
+    <div style="font-weight:bold;font-size:13px;margin-bottom:60px;text-transform:uppercase">Le Directeur</div>
+    <div style="border-top:1px solid #000;padding-top:5px;font-size:11px;color:#555">Signature &amp; Cachet</div>
+  </div>
+</div>
+
+<!-- ── FOOTER (fixed — repeats on every printed page) ── -->
+<div style="position:fixed;bottom:0;left:0;right:0;border-top:1.5px solid #000;padding:5px 1.8cm;font-size:9.5px;color:#333;text-align:center;background:#fff;font-family:Arial,Helvetica,sans-serif">
+  Établissement Public de Gestion des Centres d'Enfouissement Technique (Démo) &nbsp;—&nbsp; Cité Administrative 3ème étage, Démo 18000 &nbsp;—&nbsp; Tél&nbsp;: 000 00 00 00 &nbsp;—&nbsp; contact@demo-cet.dz
+</div>
+
+</div></body></html>`;
+}
+
+function generateEmptyBillHTML(c, company) {
+  const TVA = c.vatSubject ? 19 : 0;
+  const date = new Date().toLocaleDateString('fr-DZ');
+  const year = new Date().getFullYear();
+  const co = f => {
+    const arr = Array.isArray(company) ? company : [];
+    return arr.find(x=>x.id===f)?.value || '';
+  };
+  const BLANK_ROWS = Array.from({length:6}, (_,i) => `
+    <tr style="height:32px">
+      <td style="text-align:center;color:#aaa">${i+1}</td>
+      <td></td>
+      <td style="text-align:right"></td>
+      <td style="text-align:right"></td>
+      <td style="text-align:center"></td>
+      <td style="text-align:right"></td>
+    </tr>`).join('');
+  return `<!DOCTYPE html>
+<html xmlns:o='urn:schemas-microsoft-com:office:office'
+      xmlns:w='urn:schemas-microsoft-com:office:word'
+      xmlns='http://www.w3.org/TR/REC-html40' lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<title>Modèle Facture — ${c.name}</title>
+<!--[if gte mso 9]><xml>
+<w:WordDocument>
+  <w:View>Print</w:View>
+  <w:Zoom>100</w:Zoom>
+  <w:DoNotOptimizeForBrowser/>
+</w:WordDocument>
+</xml><![endif]-->
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#000}
+  table{border-collapse:collapse;width:100%}
+  th,td{border:1px solid #000;padding:6px 10px}
+  th{background:#f0f0f0;font-weight:bold;text-align:center;font-size:13px}
+  .nb td,.nb th{border:none;padding:3px 5px}
+  .sep{border-top:2.5px solid #000;margin:6px 0}
+  .sep2{border-top:1px solid #000;margin:5px 0}
+  .r{text-align:right}.c{text-align:center}.b{font-weight:bold}
+  @page WordSection1{size:21.0cm 29.7cm;margin:1.5cm 1.8cm;mso-page-orientation:portrait}
+  @page{size:21.0cm 29.7cm;margin:1.5cm 1.8cm}
+  div.WordSection1{page:WordSection1}
+  @media print{body{padding:0} .WordSection1{padding-bottom:32px}}
+</style>
+</head>
+<body>
+<div class="WordSection1">
+
+<div style="text-align:center;font-size:15px;font-weight:bold;direction:rtl;font-family:'Traditional Arabic',Arial,sans-serif;margin-bottom:8px;color:#000">
+  الجمهورية الجزائرية الديموقراطية الشعبية
+</div>
+
+<table class="nb" style="width:100%;margin-bottom:6px">
+  <tr>
+    <td style="border:none;vertical-align:top;width:70%">
+      <div style="font-size:12px;line-height:2;color:#000">
+        <div style="font-size:13.5px;font-weight:bold;margin-bottom:4px">
+          Établissement Public de Gestion des Centres d'Enfouissement Technique (Démo)
+        </div>
+        <div>Cité Administrative, 01ème Étage, Zone Démo — Démo</div>
+        <div>IF&nbsp;: 000918044299126 &nbsp;·&nbsp; RC&nbsp;: 18/000442991H09</div>
+        <div>Tél&nbsp;: 000 00 00 00 &nbsp;·&nbsp; Fax&nbsp;: 000 00 00 00</div>
+        <div>BNQ&nbsp;: BADR Démo — [N° compte]</div>
+      </div>
+    </td>
+    <td style="border:none;text-align:right;vertical-align:middle;width:30%">
+      <img src="/logo.png" alt="CETManager" style="width:90px;height:90px;object-fit:contain"/>
+    </td>
+  </tr>
+</table>
+
+<div class="sep"></div>
+
+<div style="display:flex;justify-content:space-between;padding:6px 2px;font-weight:bold;font-size:13.5px">
+  <span>FACTURE CLIENT : N°____________/${year}</span>
+  <span>DÉMO, LE : ${date}</span>
+</div>
+
+<div class="sep"></div>
+
+<div style="margin:10px 2px 14px;font-size:12.5px;line-height:1.9">
+  <div style="font-weight:bold;font-size:13px;margin-bottom:3px">FACTURÉ À :</div>
+  <div>${c.id} — ${c.name}</div>
+  ${c.nif    ? `<div>M.F.&nbsp;: ${c.nif}</div>` : ''}
+  ${c.rc     ? `<div>R.C.&nbsp;: ${c.rc}</div>`  : ''}
+  ${c.address? `<div>${c.address}</div>`           : ''}
+  <div style="margin-top:4px;font-size:11.5px;color:#555">
+    Régime TVA&nbsp;: ${TVA > 0 ? `Assujetti — ${TVA}%` : 'Non assujetti (exonéré)'}
+  </div>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width:36px">N°</th>
+      <th style="text-align:left;padding-left:10px">DÉSIGNATION</th>
+      <th style="width:100px">QUANTITÉ</th>
+      <th style="width:110px">PRIX U. (DA)</th>
+      <th style="width:64px">% TVA</th>
+      <th style="width:110px">MONTANT HT</th>
+    </tr>
+  </thead>
+  <tbody>
+    ${BLANK_ROWS}
+    <tr style="background:#f5f5f5">
+      <td colspan="2" class="b" style="font-size:13px">TOTAL GÉNÉRAL</td>
+      <td class="c" style="color:#999;font-size:11px">—</td>
+      <td></td><td></td>
+      <td class="r b"></td>
+    </tr>
+  </tbody>
+</table>
+
+<div style="margin-top:10px;border:1px solid #000;padding:7px 12px;font-size:12px">
+  <strong>Arrêtée la présente facture à la somme de :</strong><br>
+  <span style="font-weight:bold;text-transform:uppercase;letter-spacing:.02em">_______________________________________________________________________________</span>
+</div>
+
+<div style="display:flex;gap:16px;margin-top:12px;align-items:flex-start">
+  <table style="width:46%">
+    <thead>
+      <tr><th>TVA %</th><th>BASE HT</th><th>MONTANT TVA</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="c">${TVA > 0 ? TVA+',00 %' : 'Exonéré'}</td>
+        <td class="r"></td>
+        <td class="r"></td>
+      </tr>
+      <tr class="b">
+        <td class="c b">TOTAL</td>
+        <td class="r b"></td>
+        <td class="r b"></td>
+      </tr>
+    </tbody>
+  </table>
+  <table style="width:52%;margin-left:auto">
+    <tbody>
+      <tr><td style="width:58%">Montant H.T.</td><td class="r"></td></tr>
+      <tr><td>T.V.A. (${TVA}%)</td><td class="r"></td></tr>
+      <tr><td>Montant T.T.C.</td><td class="r"></td></tr>
+      <tr style="background:#e8e8e8">
+        <td class="b" style="font-size:14px">NET À PAYER</td>
+        <td class="r b" style="font-size:15px"></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div style="margin-top:48px;display:flex;justify-content:flex-start;padding-left:8%">
+  <div style="text-align:center;min-width:200px">
+    <div style="font-weight:bold;font-size:13px;margin-bottom:60px;text-transform:uppercase">Le Directeur</div>
+    <div style="border-top:1px solid #000;padding-top:5px;font-size:11px;color:#555">Signature &amp; Cachet</div>
+  </div>
+</div>
+
+<div style="margin-top:28px;padding-top:7px;border-top:1px solid #bbb;font-size:10px;color:#666;text-align:center">
+  Établissement Public de Gestion des Centres d'Enfouissement Technique (Démo) — Cité Administrative, Zone Démo — Tél&nbsp;: 000 00 00 00
+</div>
+
+</div></body></html>`;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   INVOICE / RELEVÉ MENSUEL
+═══════════════════════════════════════════════════════════════════════════ */
+function PageInvoice({clients,discharges,sites,wasteTypes,invoices,addInvoice,updateInvoice,updateDischarge,company,refreshInvoices}) {
+  const t = useT();
+  const now = new Date();
+         const findBestDischarges = (budget, discharges) => {
+  const sorted = [...discharges].sort((a, b) => (b.total||0) - (a.total||0));
+  let remaining = budget;
+  const selected = [];
+  for (const d of sorted) {
+    if ((d.total||0) <= remaining + 0.001) {
+      selected.push(d);
+      remaining = Math.round((remaining - (d.total||0)) * 1000) / 1000;
+    }
+  }
+  return selected;
+};
+       
+  const defaultMonth = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
+  const [view,  setView]  = useState("global"); // "global" | "client" | "debts"
+  const [selC,  setSelC]  = useState("");
+  const [month, setMonth] = useState(defaultMonth);
+  // Per-discharge payment data for the selected client (Relevé Client view)
+  const [clientDiscPayments, setClientDiscPayments] = useState({});
+
+  const billed = clients.filter(c=>(c.type==="convention"||c.type==="rotation"||c.type==="prepaid")&&c.status==="approved");
+  const c       = billed.find(c=>c.id===selC) || billed[0];
+  const selCId  = c?.id || "";
+  // Annual clients accumulate across the whole year; monthly clients use the selected month
+  const clientPeriod = (cl) => cl?.payFrequency === "annual" ? month.slice(0,4) : month;
+  const selPeriod = clientPeriod(c);
+  const entries = discharges.filter(d=>d.clientId===selCId&&tsMatchesPfx(d.ts,selPeriod)&&d.status!=="cancelled");
+  const totalNet  = entries.reduce((s,d)=>s+d.net,0);
+  const totalCost = entries.reduce((s,d)=>s+d.total,0);
+
+  // Group entries into invoice line items by (opType, wasteType, billingMode, unitPrice)
+  const lineItems = Object.values(
+    entries.reduce((acc, d) => {
+      const opT         = d.opType==="collect" ? "collect" : "treatment";
+      const billingMode = d.payMethod==="rotation" ? "rotation" : "tonnage";
+      const wt          = wasteTypes.find(w=>w.id===d.wasteType);
+      const key         = `${opT}|${d.wasteType}|${billingMode}|${d.unitPrice}`;
+      if (!acc[key]) acc[key] = { opType:opT, wasteTypeId:d.wasteType, wtLabel:wt?.label||d.wasteType, billingMode, unitPrice:d.unitPrice||0, qty:0, count:0, total:0, minTs:d.ts };
+      acc[key].count += 1;
+      acc[key].qty   += billingMode==="rotation" ? 1 : (d.net||0);
+      acc[key].total += d.total||0;
+      if (d.ts && d.ts < acc[key].minTs) acc[key].minTs = d.ts;
+      return acc;
+    }, {})
+  );
+  // Per-wasteType payment totals from discharge_payments ledger (for Relevé Client annotations)
+  const wtPayMap = entries.reduce((acc, d) => {
+    const dp = clientDiscPayments[d.id];
+    if (!dp || dp.paidTTC <= 0) return acc;
+    if (!acc[d.wasteType]) acc[d.wasteType] = { paidTTC: 0, details: [] };
+    acc[d.wasteType].paidTTC = Math.round((acc[d.wasteType].paidTTC + dp.paidTTC) * 100) / 100;
+    (dp.details || []).forEach(det => acc[d.wasteType].details.push(det));
+    return acc;
+  }, {});
+  // Distinct payment transactions that touched this period's discharges — for the history panel
+  const periodPayTxns = Object.values(
+    entries.reduce((acc, d) => {
+      const dp = clientDiscPayments[d.id];
+      if (!dp) return acc;
+      const wt = wasteTypes.find(w => w.id === d.wasteType);
+      (dp.details || []).forEach(det => {
+        if (!acc[det.paymentId]) acc[det.paymentId] = {
+          paymentId: det.paymentId, billId: det.billId,
+          createdAt: det.createdAt, totalApplied: 0, lines: []
+        };
+        acc[det.paymentId].totalApplied = Math.round((acc[det.paymentId].totalApplied + det.appliedTTC) * 100) / 100;
+        acc[det.paymentId].lines.push({ label: wt?.label || d.wasteType, appliedTTC: det.appliedTTC });
+        if (!acc[det.paymentId].createdAt || (det.createdAt && det.createdAt < acc[det.paymentId].createdAt))
+          acc[det.paymentId].createdAt = det.createdAt;
+      });
+      return acc;
+    }, {})
+  ).sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+  const invNum    = `FAC-${selPeriod.replace("-","")}-${selCId}`;
+  const currentInv = invoices.find(i=>i.id===invNum) || invoices.find(i=>i.clientId===selCId&&i.month===selPeriod);
+
+  const monthLabel = new Date(month+"-02").toLocaleString("fr-FR",{month:"long",year:"numeric"});
+  // Label shown in the selected-client detail view — year only for annual billing clients
+  const selPeriodLabel = c?.payFrequency === "annual" ? month.slice(0,4) : monthLabel;
+  const globalRows = billed.map(cl=>{
+    const clPeriod = clientPeriod(cl);
+    const clEntries = discharges.filter(d=>d.clientId===cl.id&&tsMatchesPfx(d.ts,clPeriod)&&d.status!=="cancelled");
+    const clNet  = clEntries.reduce((s,d)=>s+d.net,0);
+    const rawCost = clEntries.reduce((s,d)=>s+d.total,0);
+    // Phase 2: bill 100% of consumption regardless of creditEnabled —
+    // creditLimit is a discharge gate only, never a billing-amount reducer.
+    const clCost = rawCost;
+    const existInv = invoices.find(i=>i.clientId===cl.id&&i.month===clPeriod);
+    // Compute limit usage percentage for notification
+    let limitPct = 0, limitData = null;
+    if (cl.type==="prepaid" && cl.creditLimit>0) {
+      const used=cl.consumed, lim=cl.creditLimit;
+      limitPct=Math.min(Math.round((used/lim)*100),100);
+      limitData={used, limit:lim, unit:"DA", rem:Math.max(0,lim-used), fmtUsed:used.toLocaleString("fr-FR")+" DA", fmtLim:lim.toLocaleString("fr-FR")+" DA", fmtRem:Math.max(0,lim-used).toLocaleString("fr-FR")+" DA"};
+    } else if (cl.creditEnabled && cl.creditLimit>0) {
+      const used=cl.consumed, lim=cl.creditLimit;
+      limitPct=Math.min(Math.round((used/lim)*100),100);
+      limitData={used, limit:lim, unit:"DA", rem:Math.max(0,lim-used), fmtUsed:used.toLocaleString("fr-FR")+" DA", fmtLim:lim.toLocaleString("fr-FR")+" DA", fmtRem:Math.max(0,lim-used).toLocaleString("fr-FR")+" DA"};
+    } else if (cl.weightLimitYear>0) {
+      const isRot=cl.type==="rotation";
+      const isMonthly=cl.payFrequency==="monthly";
+      const pfx=isMonthly?`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`:now.getFullYear().toString();
+      const pDs=discharges.filter(d=>d.clientId===cl.id&&tsMatchesPfx(d.ts,pfx)&&d.status!=="cancelled");
+      const used=isRot?pDs.length:pDs.reduce((s,d)=>s+d.net,0);
+      const lim=cl.weightLimitYear;
+      limitPct=Math.min(Math.round((used/lim)*100),100);
+      const unit=isRot?"rot.":"t";
+      limitData={used, limit:lim, unit, rem:Math.max(0,lim-used),
+        fmtUsed:(isRot?used+" rot.":used.toFixed(2)+" t"),
+        fmtLim:(isRot?lim+" rot.":lim.toFixed(2)+" t"),
+        fmtRem:(isRot?Math.max(0,lim-used)+" rot.":Math.max(0,lim-used).toFixed(2)+" t")};
+    }
+    return {cl, entries:clEntries, net:clNet, cost:clCost, rawCost, inv:existInv, limitPct, limitData};
+  });
+  const grandNet  = globalRows.filter(r=>r.cl.type!=="rotation").reduce((s,r)=>s+r.net,0);
+  const grandCost = globalRows.reduce((s,r)=>{
+    if (r.inv?.status==="paid") return s;
+    if (r.inv?.status==="partial") return s + (r.inv.totalAmount - (r.inv.paidAmount||0));
+    // Pending or overdue invoice already has TTC stored in totalAmount
+    if (r.inv?.status==="pending" || r.inv?.status==="overdue") return s + (r.inv.totalAmount||0);
+    // No invoice yet — estimate TTC from discharge totals
+    return s + toTTC(r.cost, r.cl.vatSubject);
+  },0);
+  const grandDeps = globalRows.reduce((s,r)=>s+r.entries.length,0);
+
+  const switchToClient = (id) => { setSelC(id); setView("client"); };
+
+  // Fetch discharge payments for the selected client whenever it changes
+  useEffect(() => {
+    if (!selCId) { setClientDiscPayments({}); return; }
+    apiFetch(`/api/clients/${selCId}/discharge-payments`)
+      .then(r => r.json())
+      .then(data => { if (data && typeof data === 'object' && !data.error) setClientDiscPayments(data); })
+      .catch(() => {});
+  }, [selCId]);
+
+  // Fetch payment journal when the journal tab is active
+  useEffect(() => {
+    if (view !== "journal") return;
+    setJournalLoading(true);
+    apiFetch('/api/payments')
+      .then(r => r.json())
+      .then(data => { if (Array.isArray(data)) setJournalPayments(data); })
+      .catch(() => {})
+      .finally(() => setJournalLoading(false));
+  }, [view]);
+
+  // Generate/update invoice for a client+month (totalAmount stored as TTC)
+  const generateInvoice = async (cl, costHT) => {
+    const ttc = toTTC(costHT, cl.vatSubject);
+    // Annual clients get a year-level invoice (e.g. "2026"); monthly clients get "2026-06"
+    const period = clientPeriod(cl);
+    const id = `FAC-${period.replace("-","")}-${cl.id}`;
+    const existing = invoices.find(i=>i.id===id) || invoices.find(i=>i.clientId===cl.id&&i.month===period);
+    // Prepaid clients have already deposited their balance — invoice is always fully paid
+    if (cl.type === "prepaid") {
+      const today = new Date().toISOString().slice(0,10);
+      if (existing) {
+        await updateInvoice({...existing, totalAmount:ttc, paidAmount:ttc, status:"paid", paidAt: existing.paidAt || today});
+      } else {
+        await addInvoice({id, clientId:cl.id, month:period, totalAmount:ttc, paidAmount:ttc, status:"paid", paidAt:today, note:""});
+      }
+      return;
+    }
+    if (existing) {
+      if (existing.status === "paid") {
+        if (ttc > (existing.paidAmount||0)) {
+          // New charges added after payment — remaining balance now due
+          await updateInvoice({...existing, totalAmount:ttc, status:"partial"});
+        }
+        // If ttc <= paidAmount: invoice is fully covered — do nothing, never touch it
+      } else if (existing.status === "partial") {
+        // Partial payment recorded — update amount, recalculate status, keep paidAmount/paidAt
+        const newStatus = (existing.paidAmount||0) >= ttc ? "paid" : "partial";
+        await updateInvoice({...existing, totalAmount:ttc, status:newStatus});
+      } else {
+        // pending/overdue — preserve any payment already recorded, never wipe history
+        const prevPaid = existing.paidAmount || 0;
+        if (prevPaid > 0) {
+          const newStatus = prevPaid >= ttc ? "paid" : "partial";
+          await updateInvoice({...existing, totalAmount:ttc, status:newStatus});
+        } else {
+          await updateInvoice({...existing, totalAmount:ttc, status:"pending", paidAmount:0, paidAt:null});
+        }
+      }
+    } else {
+      await addInvoice({id, clientId:cl.id, month:period, totalAmount:ttc, status:"pending", note:""});
+    }
+  };
+
+  const generateAllInvoices = async () => {
+    for (const row of globalRows) {
+      // Skip paid and partial invoices — never touch them in bulk generation
+      if (row.entries.length > 0 && !(row.inv && (row.inv.status === "paid" || row.inv.status === "partial"))) {
+        await generateInvoice(row.cl, row.cost);
+      }
+    }
+  };
+
+  const [notifModal,  setNotifModal]  = useState(null);
+  const [notifCopied, setNotifCopied] = useState(false);
+  const [smsInvModal, setSmsInvModal] = useState(null); // {inv, cl, totalHT, totalTTC}
+  const [smsInvCopied,setSmsInvCopied]= useState(false);
+
+  // Bill-based payment modal — Phase 3B three-strategy engine
+  const [billPayModal,    setBillPayModal]    = useState(null);  // {bill, cl}
+  const [billPayStrategy, setBillPayStrategy] = useState("libre"); // "libre"|"specifique"|"integral"
+  const [billPayAmt,      setBillPayAmt]      = useState("");
+  const [billPaySelDiscs, setBillPaySelDiscs] = useState([]);   // for "specifique"
+  const [billPayPreview,  setBillPayPreview]  = useState(null); // result from preview endpoint
+  const [billPayPrinted,  setBillPayPrinted]  = useState(false);
+  const [billPayLoading,  setBillPayLoading]  = useState(false);
+  // Payment journal state
+  const [journalPayments, setJournalPayments] = useState([]);
+  const [journalLoading,  setJournalLoading]  = useState(false);
+
+  /* ── Bill-payment engine (Phase 3B) ─────────────────────────────────────── */
+  const openBillPayModal = async (cl) => {
+    setBillPayLoading(true);
+    try {
+      const bRes  = await apiFetch(`/api/bills?clientId=${cl.id}`);
+      const bills = await bRes.json();
+      const openB = Array.isArray(bills) ? bills.find(b => b.status === 'open' || b.status === 'partial') : null;
+      let bill;
+      if (openB) {
+        const dRes = await apiFetch(`/api/bills/${openB.id}`);
+        bill = await dRes.json();
+      } else {
+        const genRes  = await apiFetch('/api/bills', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ clientId: cl.id })
+        });
+        const genData = await genRes.json();
+        if (genData.error) { alert(`⚠️ ${genData.error}`); return; }
+        // Fetch full bill detail (with remaining_ttc per discharge)
+        const dRes = await apiFetch(`/api/bills/${genData.id}`);
+        bill = await dRes.json();
+      }
+      setBillPayModal({ bill, cl });
+      setBillPayStrategy("libre");
+      setBillPayAmt("");
+      setBillPaySelDiscs([]);
+      setBillPayPreview(null);
+      setBillPayPrinted(false);
+    } catch(e) { alert("Erreur lors du chargement de la facture."); }
+    finally { setBillPayLoading(false); }
+  };
+
+  const doBillPayPreview = async () => {
+    if (!billPayModal || billPayLoading) return;
+    setBillPayLoading(true);
+    setBillPayPreview(null);
+    setBillPayPrinted(false);
+    try {
+      const body = billPayStrategy === "specifique"
+        ? { dischargeIds: billPaySelDiscs }
+        : { amountTTC: parseFloat(billPayStrategy === "integral"
+              ? billPayModal.bill.remainingTotal
+              : billPayAmt) };
+      const res  = await apiFetch(`/api/bills/${billPayModal.bill.id}/payments/preview`, {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (data.error) { alert(`⚠️ ${data.error}`); return; }
+      if (data.unappliedAmount > 0.005) {
+        alert(`⚠️ Le montant saisi dépasse le reste dû.\nNon affecté : ${fmt(data.unappliedAmount)} DA.\nCorrigez le montant avant de continuer.`);
+        return;
+      }
+      setBillPayPreview(data);
+    } catch(e) { alert("Erreur lors de la prévisualisation."); }
+    finally { setBillPayLoading(false); }
+  };
+
+  const doBillPayGenerate = () => {
+    if (!billPayPreview || !billPayModal) return;
+    const { cl, bill } = billPayModal;
+    const { receiptByType } = billPayPreview;
+    const billNum = `FAC-PAY-${Date.now().toString(36).toUpperCase()}`;
+    const precomputedRows = receiptByType.map((r, i) => ({
+      num: i + 1,
+      label: `${r.partial ? '[Partiel] ' : ''}Traitement — ${wasteTypes.find(w => w.id === r.wasteType)?.label || r.wasteType}${r.note ? ` (${r.note})` : ''}`,
+      isRotation: r.billingMode === 'rotation',
+      qty:        r.qty,
+      unitPrice:  r.unitPrice,
+      tva:        cl.vatSubject ? 19 : 0,
+      ht:         r.montantHT,
+    }));
+    const html = generateOfficialBillHTML(cl, [], company, '', billNum, wasteTypes, { precomputedRows });
+    const win  = window.open('', '_blank');
+    if (win) { win.document.write(html); win.document.close(); setTimeout(() => win.print(), 600); }
+    const blob = new Blob(['\ufeff', html], { type: 'application/msword' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = `${billNum}.doc`;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a); URL.revokeObjectURL(url);
+    setBillPayPrinted(true);
+  };
+
+  const doBillPayConfirm = async () => {
+    if (!billPayModal || !billPayPreview || !billPayPrinted || billPayLoading) return;
+    setBillPayLoading(true);
+    try {
+      const body = billPayStrategy === "specifique"
+        ? { dischargeIds: billPaySelDiscs, method: billPayStrategy }
+        : { amountTTC: parseFloat(billPayStrategy === "integral"
+              ? billPayModal.bill.remainingTotal
+              : billPayAmt), method: billPayStrategy };
+      const res  = await apiFetch(`/api/bills/${billPayModal.bill.id}/payments`, {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (data.error) { alert(`⚠️ ${data.error}`); return; }
+      alert(`✅ Paiement enregistré.\nMontant appliqué : ${fmt(data.appliedAmount)} DA\nStatut : ${data.billStatus === 'paid' ? 'Facture soldée ✅' : 'Paiement partiel ⏳'}`);
+      setBillPayModal(null);
+      // Sync invoices state so Debt page updates immediately
+      if (refreshInvoices) await refreshInvoices();
+    } catch(e) { alert("Erreur lors de la confirmation du paiement."); }
+    finally { setBillPayLoading(false); }
+  };
+
+  // Step 1: generate & print the bill (no invoice update yet)
+  const markOverdue = async (inv) => {
+    await updateInvoice({...inv, status:"overdue"});
+  };
+  const downloadOfficialPDF = () => {
+    if (!c || entries.length === 0) return;
+    const html = generateOfficialBillHTML(c, entries, company, month, invNum, wasteTypes);
+    const win = window.open('', '_blank');
+    win.document.write(html);
+    win.document.close();
+    win.focus();
+    setTimeout(() => win.print(), 600);
+  };
+
+  const downloadOfficialWord = () => {
+    if (!c || entries.length === 0) return;
+    const html = generateOfficialBillHTML(c, entries, company, month, invNum, wasteTypes);
+    const blob = new Blob(['\ufeff', html], {type: 'application/msword'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${invNum}.doc`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // Debt-only bill: discharges not yet individually marked as paid.
+  // Using individual discharge status is the only correct approach — the coverage algorithm
+  // would re-distribute the paid amount over new+old combined line items and produce wrong totals.
+  const debtEntries = entries.filter(d => d.status !== "paid" && d.status !== "cancelled");
+  const debtHT      = debtEntries.reduce((s,d) => s + (d.total||0), 0);
+  const debtTTC     = toTTC(debtHT, c?.vatSubject);
+  const debtNum     = `${invNum}-SOLDE`;
+  const hasDebtBill = currentInv && currentInv.status !== "paid" && debtEntries.length > 0;
+  // Amount already paid specifically against the unpaid discharges:
+  // currentInv.paidAmount may include payment for old paid discharges in the same month,
+  // so subtract those to get only what was paid toward the current outstanding balance.
+  const paidDischargesHT = entries.filter(d => d.status === "paid").reduce((s,d) => s + (d.total||0), 0);
+  const alreadyPaidAgainstDebt = Math.max(0, (currentInv?.paidAmount||0) - paidDischargesHT);
+
+  const computeOutstandingRows = () => {
+    const groups = {};
+    debtEntries.forEach(d => {
+      const opT  = d.opType === 'collect' ? 'collect' : 'treatment';
+      const isRot = d.payMethod === 'rotation';
+      const key  = `${opT}|${d.wasteType}|${isRot ? 'rotation' : 'tonnage'}|${d.unitPrice}`;
+      const wt   = wasteTypes.find(w => w.id === d.wasteType);
+      if (!groups[key]) groups[key] = { opType:opT, wtLabel:wt?.label||d.wasteType, isRotation:isRot, unitPrice:d.unitPrice||0, qty:0, count:0, total:0 };
+      groups[key].count += 1;
+      groups[key].qty   += isRot ? 1 : (d.net||0);
+      groups[key].total += d.total||0;
+    });
+    const items      = Object.values(groups);
+    const totalHTAll = items.reduce((s, g) => s + g.total, 0);
+    const paid       = alreadyPaidAgainstDebt;
+    return items.map(g => {
+      // Distribute partial payment proportionally by each operation's share of total HT
+      const fraction    = totalHTAll > 0 ? g.total / totalHTAll : 0;
+      const deductHT    = paid > 0 ? fraction * paid : 0;
+      const remainHTRaw = Math.max(0, g.total - deductHT);
+      // Derive tonnage from remaining HT so qty × unitPrice = MONTANT HT exactly
+      let remainQty, remainHT;
+      if (g.isRotation) {
+        const rotFrac = g.total > 0 ? remainHTRaw / g.total : 1;
+        remainQty = Math.round(g.count * rotFrac);
+        remainHT  = Math.round(remainQty * (g.unitPrice||0) * 1000) / 1000;
+      } else {
+        remainQty = g.unitPrice > 0
+          ? Math.round(remainHTRaw / g.unitPrice * 1000) / 1000
+          : Math.round(g.qty * fraction * 1000) / 1000;
+        remainHT = Math.round(remainQty * g.unitPrice * 1000) / 1000;
+      }
+      return {
+        opType: g.opType,
+        label: `${g.opType === 'collect' ? 'Collecte et Traitement — ' : 'Traitement — '}${g.wtLabel}`,
+        isRotation: g.isRotation,
+        qty: remainQty,
+        unitPrice: g.unitPrice,
+        ht: remainHT,
+      };
+    });
+  };
+
+  const downloadDebtPDF = () => {
+    if (!c || !currentInv) return;
+    const outstandingRows = computeOutstandingRows();
+    if (!outstandingRows.length) return;
+    const html = generateOfficialBillHTML(c, [], company, month, debtNum, wasteTypes, {isDebt:true, precomputedRows:outstandingRows});
+    const win = window.open('', '_blank');
+    if (win) { win.document.write(html); win.document.close(); setTimeout(()=>win.print(), 600); }
+  };
+  const downloadDebtWord = () => {
+    if (!c || !currentInv) return;
+    const outstandingRows = computeOutstandingRows();
+    if (!outstandingRows.length) return;
+    const html = generateOfficialBillHTML(c, [], company, month, debtNum, wasteTypes, {isDebt:true, precomputedRows:outstandingRows});
+    const blob = new Blob(['\ufeff', html], {type:'application/msword'});
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = `${debtNum}.doc`;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a); URL.revokeObjectURL(url);
+  };
+
+  // All overdue/pending invoices
+  const debtInvoices = invoices.filter(i=>i.status==="overdue"||i.status==="pending"||i.status==="partial");
+  const debtTotal = debtInvoices.reduce((s,i)=>s+(i.totalAmount-(i.paidAmount||0)),0);
+
+  return (
+    <>
+      {/* View tabs + month picker */}
+      <div className="fx aic jsb mb4" style={{flexWrap:"wrap",gap:12}}>
+        <div className="seg" style={{width:"fit-content"}}>
+          {[["global","🗓 Vue Mensuelle"],["client","📋 Relevé Client"],["debts",`🔴 Dettes${debtInvoices.length>0?` (${debtInvoices.length})`:""}`],["journal","📒 Journal"]].map(([v,l])=>(
+            <button key={v} className={`seg-btn${view===v?" active":""}`} onClick={()=>setView(v)}>{l}</button>
+          ))}
+        </div>
+        <div className="fx aic g2">
+          {view!=="debts"&&view!=="journal"&&(
+            <div className="field" style={{margin:0}}>
+              <input className="fi" type="month" value={month} onChange={e=>setMonth(e.target.value)} style={{width:160}}/>
+            </div>
+          )}
+          {view==="global"&&grandDeps>0&&(
+            <button className="btn bp bsm" onClick={generateAllInvoices}>🧾 Générer factures du mois</button>
+          )}
+        </div>
+      </div>
+
+      {/* ── GLOBAL MONTHLY VIEW ── */}
+      {view==="global"&&(
+        <>
+          <div className="kpi-grid" style={{gridTemplateColumns:"repeat(4,1fr)",marginBottom:16}}>
+            {[
+              {lbl:"Clients facturables", val:billed.length,         ic:"🏢", kc:"var(--info)"},
+              {lbl:"Tonnage Total (hors rot.)", val:fmtN(grandNet)+" t", ic:"⚖️", kc:"var(--purple)"},
+              {lbl:"Montant Total Dû",    val:fmt(grandCost),        ic:"💰", kc:"var(--g)"},
+              {lbl:"Factures générées",   val:globalRows.filter(r=>r.inv).length+"/"+billed.length, ic:"🧾", kc:"var(--warn)"},
+            ].map(k=>(
+              <div key={k.lbl} className="kpi" style={{"--kc":k.kc}}>
+                <div className="kpi-i">{k.ic}</div>
+                <div className="kpi-l">{k.lbl}</div>
+                <div className="kpi-v">{k.val}</div>
+                <div className="kpi-s">{grandDeps} dépôts · {monthLabel}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="panel">
+            <div className="ph">
+              <span className="pt">Relevé Mensuel — {monthLabel}</span>
+              <span className="tsm tmu">{billed.length} clients facturables</span>
+            </div>
+            <div className="tw">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Client</th><th>Type</th><th>Dépôts</th>
+                    <th>Tonnage (t)</th><th>Montant Dû</th>
+                    <th>Statut Facture</th><th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {globalRows.map(({cl,entries:clE,net:clN,cost:clC,inv,limitPct,limitData})=>{
+                    return (
+                      <tr key={cl.id}>
+                        <td style={{fontWeight:700}}>{cl.name}</td>
+                        <td>
+                          {(()=>{
+                            // Compute quota for any client with a limit
+                            const hasLimit = cl.creditEnabled || cl.weightLimitYear>0;
+                            const isRot    = cl.type==="rotation";
+                            const isPre    = cl.type==="prepaid";
+                            let miniBar = null;
+                            if (isPre || hasLimit || isRot) {
+                              let usedQ, limitQ, unitLabel, remLabel;
+                              if (isPre) {
+                                usedQ=cl.consumed; limitQ=cl.creditLimit; unitLabel="DA";
+                                remLabel=v=>fmt(v)+" DA";
+                              } else if (cl.creditEnabled) {
+                                usedQ=cl.consumed; limitQ=cl.creditLimit; unitLabel="DA";
+                                remLabel=v=>fmt(v)+" DA";
+                              } else {
+                                const isMonthly = cl.payFrequency==="monthly";
+                                const pfx = isMonthly
+                                  ? `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`
+                                  : now.getFullYear().toString();
+                                const pDs = discharges.filter(d=>d.clientId===cl.id&&tsMatchesPfx(d.ts,pfx)&&d.status!=="cancelled");
+                                usedQ  = isRot ? pDs.length : pDs.reduce((s,d)=>s+d.net,0);
+                                limitQ = cl.weightLimitYear;
+                                unitLabel = isRot?"rot.":"t";
+                                remLabel  = isRot ? v=>v+" rot." : v=>fmtN(v)+" t";
+                              }
+                              if (limitQ>0) {
+                                const pp  = Math.min(Math.round((usedQ/limitQ)*100),100);
+                                const col = pp>=100?"var(--err)":pp>=90?"var(--err)":pp>=70?"var(--warn)":"var(--g)";
+                                const rem = Math.max(0,limitQ-usedQ);
+                                miniBar = (
+                                  <div style={{minWidth:90,marginTop:4}}>
+                                    <div className="cbt" style={{height:4,marginBottom:3}}>
+                                      <div className="cbf" style={{width:`${pp}%`,background:col,borderRadius:4}}/>
+                                    </div>
+                                    <div style={{fontSize:9,fontFamily:"var(--mono)",color:col,fontWeight:pp>=70?700:400}}>
+                                      {pp>=100?"🔴 Limite atteinte"
+                                        :pp>=90?"🔴 "+remLabel(rem)+" restant"
+                                        :pp>=70?"🟠 "+remLabel(rem)+" restant"
+                                        :"✅ "+remLabel(rem)+" restant"}
+                                    </div>
+                                  </div>
+                                );
+                              }
+                            }
+                            const badge = isRot
+                              ?<span className="badge" style={{background:"rgba(251,146,60,.12)",color:"var(--orange)",border:"1px solid rgba(251,146,60,.3)"}}>🔄 Rotation</span>
+                              :cl.type==="prepaid"
+                              ?<span className="badge b-info">🎫 Prépayé</span>
+                              :<span className={`badge ${cl.type==="credit"?"b-purple":cl.clientType==="state"?"b-purple":"b-info"}`}>
+                                {cl.type==="credit"?"💳 Crédit":cl.clientType==="state"?"🏛 État":"🏢 Privé"}
+                              </span>;
+                            return <div style={{display:"flex",flexDirection:"column",gap:2}}>{badge}{miniBar}</div>;
+                          })()}
+                        </td>
+                        <td>
+                          {clE.length===0
+                            ?<span className="mn tmu">—</span>
+                            :<span className="mn fw7">{clE.length}</span>}
+                        </td>
+                        <td><span className="mn">{clE.length>0?fmtN(clN)+" t":"—"}</span></td>
+                        <td>
+                          {inv&&inv.status==="paid"&&(cl.vatSubject?clC*1.19:clC)<=(inv.paidAmount||0)
+                            ?<span className="mn fw7" style={{color:"var(--muted)"}}>0 DA</span>
+                            :inv&&inv.status==="partial"
+                              ?<div>
+                                <span className="mn fw7" style={{color:"var(--warn)"}}>{fmt(inv.totalAmount-(inv.paidAmount||0))}</span>
+                                <div style={{fontSize:9,color:"var(--muted)",marginTop:1}}>reste / {fmt(inv.totalAmount)}</div>
+                              </div>
+                            :inv&&(inv.status==="pending"||inv.status==="overdue")
+                              ?<div>
+                                <span className="mn fw7">{fmt(inv.totalAmount)}</span>
+                                {cl.vatSubject && <span className="mn tmu" style={{fontSize:9,marginLeft:4}}>TTC</span>}
+                              </div>
+                            :clC>0 ? (
+                              <div>
+                                <span className="mn fw7">{fmt(toTTC(clC, cl.vatSubject))}</span>
+                                {cl.vatSubject && <span className="mn tmu" style={{fontSize:9,marginLeft:4}}>TTC (est.)</span>}
+                              </div>
+                            ) : <span className="mn tmu">—</span>}
+                        </td>
+                        <td>
+                          {inv
+                            ?<div style={{display:"flex",flexDirection:"column",gap:5}}>
+                                <div className="fx aic g2"><InvoiceStatusBadge s={inv.status}/>{inv.paidAt&&<span className="mn tmu" style={{fontSize:9}}>{inv.paidAt}</span>}</div>
+                                {(inv.status==="partial"||(inv.paidAmount>0&&inv.status!=="paid"))&&<PayProgress inv={inv} compact/>}
+                              </div>
+                            :<span className="mn tmu" style={{fontSize:10}}>Non générée</span>}
+                        </td>
+                        <td>
+                          <div className="fx aic g2" style={{flexWrap:"wrap"}}>
+                            <button className="btn bi bsm" title="Voir relevé" onClick={()=>switchToClient(cl.id)}>📋</button>
+                            {clC>0&&(!inv||(inv.status==="paid"&&toTTC(clC,cl.vatSubject)>(inv.paidAmount||0)))&&(
+                              <button className="btn bp bsm" style={{fontSize:10}} onClick={()=>generateInvoice(cl,clC)}>🧾 Facturer</button>
+                            )}
+                            {inv&&inv.status!=="paid"&&(
+                               <button className="btn bsm" style={{fontSize:10,background:"var(--indigo)",color:"#fff",borderColor:"var(--indigo)"}} onClick={()=>openBillPayModal(cl)}>💳 Paiement</button>
+                             )}
+                            <button className="btn bsm"
+                              style={{fontSize:10,background:"#0891b2",color:"#fff",borderColor:"#0891b2",
+                                opacity:billPayLoading ? 0.6 : 1}}
+                              disabled={billPayLoading}
+                              onClick={()=>openBillPayModal(cl)}
+                              title="Régler via le système de factures (Montant libre, Par décharge, Paiement intégral)">
+                              💰 Régler Facture
+                            </button>
+                            {inv&&inv.status==="pending"&&(
+                              <button className="btn be bsm" style={{fontSize:10}} onClick={()=>markOverdue(inv)}>🔴 Impayée</button>
+                            )}
+                            {inv&&clE.length>0&&(
+                              <button className="btn bg bsm" style={{fontSize:10}} title="Télécharger la facture PDF"
+                                onClick={()=>{
+                                  const invId=`FAC-${month.replace("-","")}-${cl.id}`;
+                                  const html=generateOfficialBillHTML(cl,clE,company,month,invId,wasteTypes);
+                                  const win=window.open('','_blank');
+                                  win.document.write(html);
+                                  win.document.close();
+                                  setTimeout(()=>win.print(),600);
+                                }}>📥 PDF</button>
+                            )}
+                            {limitData&&limitPct>=70&&(
+                              <button className="btn bsm" title="Notifier le client"
+                                style={{fontSize:10,
+                                  background:limitPct>=100?"var(--err)":limitPct>=90?"#f97316":"var(--warn)",
+                                  color:"#fff",
+                                  borderColor:limitPct>=100?"var(--err)":limitPct>=90?"#f97316":"var(--warn)"}}
+                                onClick={()=>{setNotifModal({cl,limitPct,limitData});setNotifCopied(false);}}>
+                                {limitPct>=100?"⚠️ Alerter":"📨 Notifier"}
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {grandDeps>0&&(
+                    <tr style={{background:"var(--ovl-sm)",borderTop:`2px solid var(--bdr)`}}>
+                      <td colSpan={2} style={{fontWeight:800,fontFamily:"var(--head)",fontSize:14}}>TOTAL DU MOIS</td>
+                      <td><span className="mn fw7">{grandDeps}</span></td>
+                      <td><span className="mn fw7">{fmtN(grandNet)} t</span></td>
+                      <td><span className="mn fw8 tg" style={{fontFamily:"var(--head)",fontSize:15}}>{fmt(grandCost)}</span></td>
+                      <td colSpan={2}/>
+                    </tr>
+                  )}
+                  {grandDeps===0&&(
+                    <tr>
+                      <td colSpan={7} style={{textAlign:"center",padding:40}}>
+                        <div style={{fontSize:32,marginBottom:8}}>📭</div>
+                        <div style={{color:"var(--muted)"}}>Aucun dépôt pour {monthLabel}</div>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* ── DEBT / UNPAID INVOICES ── */}
+      {view==="debts"&&(
+        <>
+          <div className="kpi-grid" style={{gridTemplateColumns:"repeat(3,1fr)",marginBottom:16}}>
+            {[
+              {lbl:"Factures impayées",  val:invoices.filter(i=>i.status==="overdue").length,  ic:"🔴", kc:"var(--err)"},
+              {lbl:"En attente",         val:invoices.filter(i=>i.status==="pending").length,   ic:"⏳", kc:"var(--warn)"},
+              {lbl:"Total dettes",       val:fmt(debtTotal),                                   ic:"💸", kc:"var(--err)"},
+            ].map(k=>(
+              <div key={k.lbl} className="kpi" style={{"--kc":k.kc}}>
+                <div className="kpi-i">{k.ic}</div>
+                <div className="kpi-l">{k.lbl}</div>
+                <div className="kpi-v">{k.val}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="panel">
+            <div className="ph">
+              <span className="pt">Factures Impayées / En Attente</span>
+              <span className="tsm tmu">{debtInvoices.length} facture(s)</span>
+            </div>
+            <div className="tw">
+              <table>
+                <thead>
+                  <tr><th>Référence</th><th>Client</th><th>Mois</th><th>Total</th><th>Payé</th><th>Reste dû</th><th>Statut</th><th>Actions</th></tr>
+                </thead>
+                <tbody>
+                  {debtInvoices.length===0?(
+                    <tr><td colSpan={8} style={{textAlign:"center",padding:40,color:"var(--muted)"}}>
+                      <div style={{fontSize:32,marginBottom:8}}>✅</div>Aucune dette en cours
+                    </td></tr>
+                  ):debtInvoices.map(inv=>{
+                    const cl = clients.find(c=>c.id===inv.clientId);
+                    const mLbl = new Date(inv.month+"-02").toLocaleString("fr-FR",{month:"long",year:"numeric"});
+                    const paid = inv.paidAmount||0;
+                    const rem  = inv.totalAmount - paid;
+                    return (
+                      <tr key={inv.id} style={{background:inv.status==="overdue"?"rgba(239,68,68,.04)":""}}>
+                        <td><span className="mn tmu">{inv.id}</span></td>
+                        <td style={{fontWeight:700}}>{cl?.name||inv.clientId}</td>
+                        <td><span className="mn">{mLbl}</span></td>
+                        <td><span className="mn fw7">{fmt(inv.totalAmount)}</span></td>
+                        <td><span className="mn" style={{color:paid>0?"var(--g)":"var(--muted)"}}>{paid>0?fmt(paid):"—"}</span></td>
+                        <td>
+                          <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                            <span className="mn fw7" style={{color:"var(--err)"}}>{fmt(rem)}</span>
+                            {paid>0&&<PayProgress inv={inv} compact/>}
+                          </div>
+                        </td>
+                        <td><InvoiceStatusBadge s={inv.status}/></td>
+                        <td>
+                          <div className="fx aic g2" style={{flexWrap:"wrap",gap:4}}>
+                            <button className="btn bsm" style={{fontSize:10,background:"var(--indigo)",color:"#fff",borderColor:"var(--indigo)"}} onClick={()=>{const icl=clients.find(x=>x.id===inv.clientId);if(icl)openBillPayModal(icl);}}>💳 Paiement</button>
+                            {inv.status==="pending"&&(
+                              <button className="btn be bsm" style={{fontSize:10}} onClick={()=>markOverdue(inv)}>🔴 Impayée</button>
+                            )}
+                            {(()=>{
+                              const icl  = clients.find(x=>x.id===inv.clientId);
+                              const iEnt = discharges.filter(d=>d.clientId===inv.clientId&&tsMatchesPfx(d.ts,inv.month)&&d.status!=="cancelled");
+                              if (!icl || iEnt.length===0) return null;
+                              const isDebtDoc = (inv.paidAmount||0) > 0 && inv.status !== "paid";
+                              const iEnt2 = isDebtDoc ? iEnt.filter(d=>d.status!=="paid") : iEnt;
+                              if (iEnt2.length===0) return null;
+                              const iNum = isDebtDoc ? `${inv.id}-SOLDE` : inv.id;
+                              const iOpts = isDebtDoc ? {isDebt:true} : {};
+                              return (
+                                <button className="btn bg bsm" style={{fontSize:10}}
+                                  title={isDebtDoc?"Télécharger l'avis de débit":"Télécharger la facture PDF"}
+                                  onClick={()=>{
+                                    const html=generateOfficialBillHTML(icl,iEnt2,company,inv.month,iNum,wasteTypes,iOpts);
+                                    const win=window.open('','_blank');
+                                    if(win){win.document.write(html);win.document.close();setTimeout(()=>win.print(),600);}
+                                  }}>
+                                  {isDebtDoc?"📄 Avis Débit":"📥 PDF"}
+                                </button>
+                              );
+                            })()}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* ── PAYMENT JOURNAL ── */}
+      {view==="journal"&&(
+        <>
+          <div className="panel">
+            <div className="ph">
+              <span className="pt">Journal des Paiements</span>
+              <span className="tsm tmu">{journalLoading ? "Chargement…" : `${journalPayments.length} paiement(s)`}</span>
+            </div>
+            {journalLoading ? (
+              <div style={{textAlign:"center",padding:40,color:"var(--muted)"}}>Chargement…</div>
+            ) : (
+              <div className="tw">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Date / Heure</th>
+                      <th>Client</th>
+                      <th>Montant TTC</th>
+                      <th>Mode</th>
+                      <th>Réf. Paiement</th>
+                      <th>Réf. Facture</th>
+                      <th>Décharges couvertes</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {journalPayments.length===0?(
+                      <tr><td colSpan={7} style={{textAlign:"center",padding:40,color:"var(--muted)"}}>
+                        <div style={{fontSize:32,marginBottom:8}}>📭</div>Aucun paiement enregistré
+                      </td></tr>
+                    ):journalPayments.map(p=>{
+                      const modeLabel = p.method==="specifique"  ? "Par décharge"
+                                      : p.method==="integral"    ? "Intégral"
+                                      : p.method==="libre"       ? "Montant libre"
+                                      : p.method==="convention"  ? "Convention"
+                                      : p.method || "—";
+                      const modeColor = p.method==="integral" ? "var(--g)"
+                                      : p.method==="specifique" ? "var(--indigo)"
+                                      : "var(--warn)";
+                      const allocs = Array.isArray(p.allocations) ? p.allocations : [];
+                      return (
+                        <tr key={p.id}>
+                          <td><span className="mn" style={{fontSize:11}}>{new Date(p.created_at).toLocaleString("fr-FR")}</span></td>
+                          <td style={{fontWeight:700}}>{p.client_name}</td>
+                          <td><span className="mn fw7" style={{color:"var(--g)"}}>{fmt(parseFloat(p.amount_ttc))} DA</span></td>
+                          <td>
+                            <span style={{fontSize:11,fontWeight:700,color:modeColor,
+                              background:modeColor+"18",borderRadius:4,padding:"2px 7px"}}>
+                              {modeLabel}
+                            </span>
+                          </td>
+                          <td><span className="mn tmu" style={{fontSize:11}}>{p.id}</span></td>
+                          <td><span className="mn tmu" style={{fontSize:11}}>{p.bill_id||"—"}</span></td>
+                          <td>
+                            {allocs.length===0 ? <span className="tmu">—</span> : (
+                              <div style={{display:"flex",flexWrap:"wrap",gap:3}}>
+                                {allocs.map((a,i)=>(
+                                  <span key={i} style={{fontSize:10,background:"var(--s2)",borderRadius:3,
+                                    padding:"1px 5px",border:"1px solid var(--bdr)",whiteSpace:"nowrap"}}>
+                                    {a.dischargeId} · {fmt(parseFloat(a.appliedTTC))} DA
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* ── CLIENT DETAILED VIEW ── */}
+      {view==="client"&&(
+        <>
+          <div className="fx aic g3 mb4">
+            <div className="field" style={{flex:1}}><label>Client (convention ou prépayé)</label>
+              <select className="fi" value={selCId} onChange={e=>setSelC(e.target.value)}>
+                {billed.map(cl=><option key={cl.id} value={cl.id}>{cl.name} [{cl.type==="prepaid"?"Prépayé":cl.clientType==="state"?"État":"Privé"}]</option>)}
+              </select>
+            </div>
+          </div>
+
+      {c&&(
+        <div className="inv-print-area">
+        <div className="panel">
+          {/* ── Invoice print header ── */}
+          <div style={{background:"linear-gradient(135deg,var(--s2),var(--s3))",borderBottom:"1px solid var(--bdr)",padding:20,display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+            <div>
+              <div style={{fontFamily:"var(--head)",fontSize:18,fontWeight:800,color:"var(--g)",display:"flex",alignItems:"center",gap:8}}><img src="/logo.png" alt="CETManager" style={{width:36,height:36,objectFit:"contain"}}/>{cof(company,'short')}</div>
+              <div style={{fontSize:11,color:"var(--muted)",marginTop:4,lineHeight:1.6}}>
+                {cof(company,'name')}<br/>
+                {cof(company,'address')}<br/>
+                Tél : {cof(company,'phone')} · {cof(company,'email')}
+              </div>
+            </div>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontFamily:"var(--head)",fontSize:22,fontWeight:800,letterSpacing:".05em"}}>FACTURE</div>
+              <div style={{fontFamily:"var(--mono)",fontSize:11,color:"var(--muted)",marginTop:2}}>{invNum}</div>
+              <div style={{fontSize:11,color:"var(--muted)",marginTop:4}}>
+                Émise le : {new Date().toLocaleDateString("fr-DZ")}<br/>
+                Période : <strong>{selPeriodLabel}</strong>
+              </div>
+              {(()=>{const inv=currentInv;if(!inv)return null;const invLive={...inv,totalAmount:(inv.paidAmount||0)+debtTTC};return <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:6,alignItems:"flex-end"}}><InvoiceStatusBadge s={inv.status}/>{(inv.status==="partial"||(inv.paidAmount>0&&inv.status!=="paid"))&&<PayProgress inv={invLive}/>}</div>;})()}
+            </div>
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,padding:"16px 20px 0"}}>
+            <div className="card-sm">
+              <div className="tsm tmu mb1">FACTURÉ À</div>
+              <div style={{fontWeight:700,fontSize:14}}>{c.name}</div>
+              <div className="mn tsm tmu mt1">{c.id}</div>
+              {c.nif&&<div className="tsm tmu" style={{marginTop:2}}>NIF : {c.nif}</div>}
+              {c.rc&&<div className="tsm tmu" style={{marginTop:2}}>RC : {c.rc}</div>}
+              {c.phone&&<div className="tsm tmu" style={{marginTop:2}}>Tél : {c.phone}</div>}
+              {c.address&&<div className="tsm tmu" style={{marginTop:2}}>{c.address}</div>}
+            </div>
+            <div className="card-sm">
+              <div className="tsm tmu mb2">SYNTHÈSE DE FACTURATION</div>
+              {(c.type==="rotation"
+                ? [["Nombre de rotations", entries.length], ["Tonnage total (info)", fmtN(totalNet)+" t"]]
+                : [["Nombre de dépôts", entries.length],    ["Tonnage total",         fmtN(totalNet)+" t"]]
+              ).map(([l,v])=>(
+                <div key={l} className="fx jsb mb1"><span className="tsm">{l}</span><span className="mn tsm fw7">{v}</span></div>
+              ))}
+              <div style={{borderTop:"1px solid var(--bdr)",paddingTop:8,marginTop:6}}>
+                {c.vatSubject ? (
+                  <>
+                    <div className="fx jsb mb1">
+                      <span className="tsm">Montant HT</span>
+                      <span className="mn tsm fw7">{fmt(totalCost)}</span>
+                    </div>
+                    <div className="fx jsb mb1">
+                      <span className="tsm" style={{color:"var(--warn)"}}>TVA 19%</span>
+                      <span className="mn tsm fw7" style={{color:"var(--warn)"}}>{fmt(totalCost*0.19)}</span>
+                    </div>
+                    <div className="fx jsb" style={{borderTop:"1px solid var(--bdr)",paddingTop:6,marginTop:4}}>
+                      <span className="tsm fw7">Total TTC</span>
+                      <span className="tg fw8" style={{fontFamily:"var(--head)",fontSize:16}}>{fmt(toTTC(totalCost, c?.vatSubject))}</span>
+                    </div>
+                  </>
+                ) : (
+                  <div className="fx jsb">
+                    <span className="tsm fw7">Montant total HT <span style={{color:"var(--muted)",fontWeight:400}}>(exonéré TVA)</span></span>
+                    <span className="tg fw8" style={{fontFamily:"var(--head)",fontSize:16}}>{fmt(totalCost)}</span>
+                  </div>
+                )}
+              </div>
+              {currentInv&&(currentInv.paidAmount||0)>0&&(
+                <>
+                  <div className="fx jsb mt1"><span className="tsm" style={{color:"var(--g)"}}>Déjà réglé</span><span className="mn tsm fw7" style={{color:"var(--g)"}}>{fmt(currentInv.paidAmount)}</span></div>
+                  {currentInv&&(currentInv.totalAmount-(currentInv.paidAmount||0))>0&&<div className="fx jsb mt1"><span className="tsm fw7" style={{color:"var(--err)"}}>Reste dû</span><span className="mn fw8" style={{fontFamily:"var(--head)",fontSize:15,color:"var(--err)"}}>{fmt(currentInv.totalAmount-(currentInv.paidAmount||0))}</span></div>}
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* ── Prepaid balance summary ── */}
+          {c.type==="prepaid"&&(()=>{
+            const pp=creditPct(c);
+            const remaining=Math.max(0,c.creditLimit-c.consumed);
+            const isLow     =pp>=70&&pp<90;
+            const isCritical=pp>=90&&pp<100;
+            const isDepleted=pp>=100;
+            const col=creditColor(pp);
+            return (
+              <div style={{padding:"0 20px 16px"}}>
+                {isDepleted&&<div className="alrt ae mb3" style={{padding:"10px 14px"}}><span style={{fontSize:15}}>🔴</span><div><strong>Solde épuisé !</strong> La totalité du dépôt prépayé a été consommée. Aucune nouvelle décharge n'est possible.</div></div>}
+                {isCritical&&<div className="alrt ae mb3" style={{padding:"10px 14px"}}><span style={{fontSize:15}}>🔴</span><div><strong>Solde critique !</strong> Reste <strong>{fmt(remaining)} DA</strong> ({100-pp}% du dépôt). Prévoir un rechargement urgent.</div></div>}
+                {isLow&&<div className="alrt aw mb3" style={{padding:"10px 14px"}}><span style={{fontSize:15}}>🟠</span><div><strong>Solde bas :</strong> Reste <strong>{fmt(remaining)} DA</strong> ({100-pp}% du dépôt initial). Penser à prévenir le client.</div></div>}
+                <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}}>
+                  {[
+                    ["Dépôt initial",   fmt(c.creditLimit), "var(--muted)"],
+                    ["Consommé",        fmt(c.consumed),    col],
+                    ["Solde disponible",fmt(remaining),     isDepleted?"var(--err)":isCritical?"var(--err)":isLow?"var(--warn)":"var(--g)"],
+                  ].map(([l,v,c2])=>(
+                    <div key={l} className="card-sm" style={{borderTop:`2px solid ${c2}`}}>
+                      <div style={{fontSize:9,fontFamily:"var(--mono)",color:"var(--muted)",textTransform:"uppercase",letterSpacing:".1em"}}>{l}</div>
+                      <div style={{fontFamily:"var(--head)",fontSize:15,fontWeight:800,color:c2,marginTop:4}}>{v}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{marginTop:10}}>
+                  <div className="cbt" style={{height:8,borderRadius:4}}>
+                    <div className="cbf" style={{width:`${Math.min(pp,100)}%`,background:col,borderRadius:4,transition:"width .5s"}}/>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:10,marginTop:4,fontFamily:"var(--mono)",color:"var(--muted)"}}>
+                    <span>0 DA</span>
+                    <span style={{color:col,fontWeight:700}}>{pp}% consommé</span>
+                    <span>{fmt(c.creditLimit)}</span>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ── Limit / quota progress ── */}
+          {(c.creditEnabled || c.weightLimitYear>0) && (()=>{
+            const isRotation = c.type==="rotation";
+            const isMonthlyQ = !c.creditEnabled && !isRotation && c.payFrequency==="monthly";
+            const isMonthlyR = isRotation && c.payFrequency==="monthly";
+            const pfx = (isMonthlyQ||isMonthlyR)
+              ? `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`
+              : now.getFullYear().toString();
+            const periodDs = discharges.filter(d=>d.clientId===c.id&&tsMatchesPfx(d.ts,pfx)&&d.status!=="cancelled");
+            const usedPeriod = c.creditEnabled
+              ? c.consumed
+              : isRotation
+                ? periodDs.length
+                : periodDs.reduce((s,d)=>s+d.net,0);
+            const limit = c.creditEnabled ? c.creditLimit : c.weightLimitYear;
+            const pct   = limit>0 ? Math.min(Math.round((usedPeriod/limit)*100),100) : 0;
+            const col   = pct>=100?"var(--err)":pct>80?"var(--warn)":pct>60?"#ca8a04":"var(--g)";
+            const periodLabel = c.creditEnabled
+              ? null
+              : (isMonthlyQ||isMonthlyR)
+                ? now.toLocaleString("fr-DZ",{month:"long",year:"numeric"})
+                : String(now.getFullYear());
+            return (
+              <div style={{padding:"0 20px 16px"}}>
+                <div className="card-sm" style={{borderTop:`3px solid ${col}`}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                    <span style={{fontFamily:"var(--mono)",fontSize:9,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".1em"}}>
+                      {c.creditEnabled?"Limite Crédit DA":isRotation?(isMonthlyR?"Quota Mensuel (rot.)":"Quota Annuel (rot.)"):(isMonthlyQ?"Quota Mensuel (t)":"Quota Annuel (t)")}
+                      {periodLabel&&<span style={{marginLeft:6,fontWeight:400}}>— {periodLabel}</span>}
+                    </span>
+                    <span style={{fontFamily:"var(--mono)",fontSize:12,fontWeight:800,color:col}}>{pct}%</span>
+                  </div>
+                  <div className="cbt" style={{height:8,borderRadius:4,marginBottom:8}}>
+                    <div className="cbf" style={{width:`${pct}%`,background:col,borderRadius:4,transition:"width .5s"}}/>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:11}}>
+                    <span style={{color:"var(--muted)"}}>
+                      {c.creditEnabled
+                        ?<><span style={{color:col,fontFamily:"var(--mono)",fontWeight:700}}>{fmt(usedPeriod)}</span> utilisé</>
+                        :isRotation
+                          ?<><span style={{color:col,fontFamily:"var(--mono)",fontWeight:700}}>{usedPeriod}</span> rotation(s)</>
+                          :<><span style={{color:col,fontFamily:"var(--mono)",fontWeight:700}}>{fmtN(usedPeriod)} t</span> utilisé</>}
+                    </span>
+                    <span style={{color:"var(--muted)"}}>
+                      Limite : <span style={{fontFamily:"var(--mono)",fontWeight:700,color:"var(--txt)"}}>
+                        {c.creditEnabled?fmt(limit):isRotation?(limit+" rot."):fmtN(limit)+" t"}
+                      </span>
+                    </span>
+                    <span style={{color:pct>=100?"var(--err)":"var(--g)"}}>
+                      {c.creditEnabled&&usedPeriod>limit
+                        ?<>Dette : <span style={{fontFamily:"var(--mono)",fontWeight:700,color:"var(--err)"}}>{fmt(usedPeriod-limit)}</span></>
+                        :isRotation
+                          ?<>Restant : <span style={{fontFamily:"var(--mono)",fontWeight:700}}>{Math.max(0,limit-usedPeriod)+" rot."}</span></>
+                          :c.creditEnabled
+                            ?<>Restant : <span style={{fontFamily:"var(--mono)",fontWeight:700}}>{fmt(Math.max(0,limit-usedPeriod))}</span></>
+                            :<>Restant : <span style={{fontFamily:"var(--mono)",fontWeight:700}}>{fmtN(Math.max(0,limit-usedPeriod))+" t"}</span></>
+                      }
+                    </span>
+                  </div>
+                  {pct>=90&&pct<100&&(
+                    <div className="alrt ae" style={{marginTop:8,marginBottom:0,padding:"6px 10px",fontSize:11}}>
+                      <span>🔴</span>
+                      <span><strong>Quota critique ({pct}%) :</strong> Reste seulement{" "}
+                        {c.creditEnabled?<strong>{fmt(Math.max(0,limit-usedPeriod))} DA</strong>
+                          :isRotation?<strong>{Math.max(0,limit-usedPeriod)} rotation(s)</strong>
+                          :<strong>{fmtN(Math.max(0,limit-usedPeriod))} t</strong>}.
+                        {" "}Prévoir un renouvellement urgent.
+                      </span>
+                    </div>
+                  )}
+                  {pct>=70&&pct<90&&(
+                    <div className="alrt aw" style={{marginTop:8,marginBottom:0,padding:"6px 10px",fontSize:11}}>
+                      <span>🟠</span>
+                      <span><strong>Quota bas ({pct}%) :</strong> Reste{" "}
+                        {c.creditEnabled?<strong>{fmt(Math.max(0,limit-usedPeriod))} DA</strong>
+                          :isRotation?<strong>{Math.max(0,limit-usedPeriod)} rotation(s)</strong>
+                          :<strong>{fmtN(Math.max(0,limit-usedPeriod))} t</strong>}.
+                        {" "}Penser à prévenir le client.
+                      </span>
+                    </div>
+                  )}
+                  {pct>=100&&(
+                    <div className="alrt ae" style={{marginTop:8,marginBottom:0,padding:"6px 10px",fontSize:11}}>
+                      <span>🚫</span><span><strong>Limite atteinte</strong> — Aucun nouveau dépôt autorisé pour les opérateurs.</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
+          <div className="tw" style={{padding:"16px 0 0"}}>
+            <table>
+              <thead>
+                <tr>
+                  <th style={{width:32}}>#</th>
+                  <th>Description de la Prestation</th>
+                  <th style={{textAlign:"right"}}>Quantité</th>
+                  <th style={{textAlign:"right"}}>Prix Unitaire</th>
+                  <th style={{textAlign:"right"}}>Montant (DA)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lineItems.length===0
+                  ?<tr><td colSpan={5} style={{textAlign:"center",color:"var(--muted)",padding:30}}>Aucun dépôt pour cette période</td></tr>
+                  :(()=>{
+                    // paidAmount is TTC; item.total is HT.
+                    const totalHT = lineItems.reduce((s,li)=>s+li.total,0);
+                    const invTTC  = currentInv?.totalAmount
+                      || toTTC(totalHT, c.vatSubject);
+                    // Pre-compute each item's TTC share
+                    const itemTTCs = lineItems.map(item =>
+                      totalHT > 0
+                        ? Math.round((item.total / totalHT) * invTTC * 100) / 100
+                        : toTTC(item.total, c.vatSubject)
+                    );
+                    // Distribute partial payment equally across all waste-type line items.
+                    // e.g. 3000 DA paid, 3 waste-type lines → 1000 DA allocated to each line.
+                    const payStatuses  = new Array(lineItems.length).fill('unpaid');
+                    const partialPaids = new Array(lineItems.length).fill(0);
+                    const totalPaid = currentInv ? (currentInv.paidAmount||0) : 0;
+                    if (totalPaid > 0 && lineItems.length > 0) {
+                      const sharePerLine = totalPaid / lineItems.length;
+                      for (let idx = 0; idx < lineItems.length; idx++) {
+                        const itc = itemTTCs[idx];
+                        if (sharePerLine >= itc) {
+                          payStatuses[idx] = 'paid';
+                          partialPaids[idx] = itc;
+                        } else {
+                          payStatuses[idx] = 'partial';
+                          partialPaids[idx] = Math.round(sharePerLine * 100) / 100;
+                        }
+                      }
+                    }
+                    return lineItems.map((item,i)=>{
+                      const itemTTC   = itemTTCs[i];
+                      const payStatus = payStatuses[i];
+                      const partialPaid = partialPaids[i];
+                      const isPaid    = payStatus==='paid';
+                      const isPartial = payStatus==='partial';
+                      const isUnpaid  = payStatus==='unpaid';
+                      const resteItem = Math.round((itemTTC - partialPaid)*100)/100;
+                      return (
+                        <tr key={i} style={{
+                          background: isPaid ? 'rgba(46,201,92,.06)' : isPartial ? 'rgba(234,179,8,.06)' : (currentInv&&currentInv.paidAmount>0) ? 'rgba(239,68,68,.04)' : undefined,
+                          opacity: isPaid ? 0.75 : 1,
+                        }}>
+                          <td className="mn tmu">{i+1}</td>
+                          <td>
+                            <div style={{fontWeight:700,fontSize:12,display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                              {item.opType==="collect"
+                                ?<span style={{color:"var(--purple)"}}>🚛 Collecte et Traitement</span>
+                                :<span>🏭 Traitement</span>}
+                              {" — "}{item.wtLabel}
+                              {isPaid&&<span style={{fontSize:9,fontWeight:800,color:'var(--g)',background:'rgba(46,201,92,.18)',border:'1px solid var(--g)',borderRadius:4,padding:'1px 6px',letterSpacing:'.05em'}}>✓ PAYÉ</span>}
+                              {isPartial&&<span style={{fontSize:9,fontWeight:800,color:'var(--warn)',background:'rgba(234,179,8,.18)',border:'1px solid var(--warn)',borderRadius:4,padding:'1px 6px',letterSpacing:'.05em'}}>⏳ PARTIEL</span>}
+                              {isUnpaid&&currentInv&&currentInv.paidAmount>0&&<span style={{fontSize:9,fontWeight:800,color:'var(--err)',background:'rgba(239,68,68,.12)',border:'1px solid var(--err)',borderRadius:4,padding:'1px 6px',letterSpacing:'.05em'}}>À PAYER</span>}
+                             {/* 💳 Payment detail from discharge_payments ledger */}
+                             {(()=>{
+                               const wp = wtPayMap[item.wasteTypeId];
+                               if (!wp || wp.paidTTC <= 0) return null;
+                               const sorted = [...wp.details].sort((a,b)=>new Date(a.createdAt)-new Date(b.createdAt));
+                               const totalTTCItem = c.vatSubject ? Math.round(item.total*1.19*100)/100 : item.total;
+                               const remItem = Math.max(0, Math.round((totalTTCItem - wp.paidTTC)*100)/100);
+                               return (
+                                 <div style={{marginTop:6,paddingTop:6,borderTop:"1px dashed var(--bdr)"}}>
+                                   <div style={{fontSize:10,color:"var(--indigo)",fontWeight:700,marginBottom:4}}>
+                                     💳 Paiements enregistrés (ledger officiel)
+                                   </div>
+                                   {sorted.map((p,pi)=>(
+                                     <div key={pi} style={{display:"flex",alignItems:"center",gap:8,fontSize:10,marginBottom:2,flexWrap:"wrap"}}>
+                                       <span style={{color:"var(--muted)",fontFamily:"var(--mono)",minWidth:68}}>
+                                         {p.createdAt ? new Date(p.createdAt).toLocaleDateString("fr-DZ") : "—"}
+                                       </span>
+                                       <span style={{color:"var(--g)",fontWeight:800,fontFamily:"var(--mono)"}}>+{fmt(p.appliedTTC)} DA</span>
+                                       <span style={{color:"var(--muted)",fontSize:9,fontFamily:"var(--mono)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:140}}
+                                         title={`Pmt: ${p.paymentId} · Fact: ${p.billId||'—'}`}>
+                                         {p.paymentId}
+                                       </span>
+                                     </div>
+                                   ))}
+                                   <div style={{display:"flex",justifyContent:"space-between",marginTop:4,paddingTop:3,
+                                     borderTop:"1px solid var(--bdr)",fontSize:10,fontWeight:700}}>
+                                     <span style={{color:"var(--indigo)"}}>Total réglé</span>
+                                     <span style={{fontFamily:"var(--mono)",color:"var(--g)"}}>{fmt(wp.paidTTC)} DA</span>
+                                   </div>
+                                   {remItem > 0.005 && (
+                                     <div style={{display:"flex",justifyContent:"space-between",fontSize:10,fontWeight:700,marginTop:2}}>
+                                       <span style={{color:"var(--warn)"}}>Reste dû</span>
+                                       <span style={{fontFamily:"var(--mono)",color:"var(--warn)"}}>{fmt(remItem)} DA</span>
+                                     </div>
+                                   )}
+                                 </div>
+                               );
+                             })()}
+                            </div>
+                          </td>
+                          <td className="mn" style={{textAlign:"right",color:isPaid?"var(--muted)":undefined}}>
+                            {item.billingMode==="rotation"?`${item.qty} rot.`:`${fmtN(item.qty)} t`}
+                          </td>
+                          <td className="mn tmu" style={{textAlign:"right",color:isPaid?"var(--muted)":undefined}}>
+                            {fmt(item.unitPrice)}{item.billingMode==="rotation"?" /rot.":" /t"}
+                          </td>
+                          <td className="mn fw7" style={{textAlign:"right"}}>
+                            {isPaid
+                              ?<span style={{color:'var(--g)'}}>{fmt(item.total)}</span>
+                              :isPartial
+                                ?<span style={{color:'var(--warn)'}}>{fmt(item.total)}</span>
+                                :<span style={{color:currentInv&&currentInv.paidAmount>0?'var(--err)':undefined}}>{fmt(item.total)}</span>}
+                          </td>
+                        </tr>
+                      );
+                    });
+                  })()
+                }
+                {entries.length>0&&(
+                  <>
+                    <tr style={{background:"rgba(46,201,92,.04)"}}>
+                      <td colSpan={2} style={{textAlign:"right",fontWeight:700}}>TOTAL HT</td>
+                      <td className="mn tmu" style={{textAlign:"right",color:"var(--muted)",fontSize:10}}>—</td>
+                      <td/>
+                      <td className="mn fw7" style={{textAlign:"right"}}>{fmt(totalCost)}</td>
+                    </tr>
+                    {c.vatSubject&&(
+                      <>
+                        <tr style={{background:"rgba(234,179,8,.06)"}}>
+                          <td colSpan={4} style={{textAlign:"right",color:"var(--warn)",fontWeight:600,fontSize:11}}>TVA 19%</td>
+                          <td className="mn fw7" style={{textAlign:"right",color:"var(--warn)"}}>{fmt(totalCost*0.19)}</td>
+                        </tr>
+                        <tr style={{background:"rgba(46,201,92,.08)"}}>
+                          <td colSpan={4} style={{textAlign:"right",fontWeight:800}}>TOTAL TTC</td>
+                          <td className="fw8 tg" style={{fontFamily:"var(--head)",fontSize:16,textAlign:"right"}}>{fmt(totalCost*1.19)}</td>
+                        </tr>
+                      </>
+                    )}
+                    {!c.vatSubject&&(
+                      <tr style={{background:"rgba(46,201,92,.04)"}}>
+                        <td colSpan={4} style={{textAlign:"right",fontWeight:800}}>NET À PAYER <span style={{fontWeight:400,fontSize:10,color:"var(--muted)"}}>(exonéré TVA)</span></td>
+                        <td className="fw8 tg" style={{fontFamily:"var(--head)",fontSize:16,textAlign:"right"}}>{fmt(totalCost)}</td>
+                      </tr>
+                    )}
+                  </>
+                )}
+              </tbody>
+            </table>
+          </div>
+          {/* 📊 Payment history from discharge_payments ledger — period summary */}
+          {periodPayTxns.length > 0 && (
+            <div className="print-hide" style={{padding:"16px 20px",borderTop:"1px solid var(--bdr)"}}>
+              <div style={{fontWeight:700,fontSize:12,color:"var(--indigo)",marginBottom:10}}>
+                📊 Récapitulatif des paiements — {selPeriodLabel}
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                {periodPayTxns.map((txn,i)=>(
+                  <div key={i} style={{display:"flex",alignItems:"flex-start",gap:12,padding:"8px 12px",
+                    background:"rgba(99,102,241,.04)",border:"1px solid rgba(99,102,241,.15)",borderRadius:8}}>
+                    <div style={{minWidth:90,fontSize:11,color:"var(--muted)",fontFamily:"var(--mono)",paddingTop:2}}>
+                      {txn.createdAt ? new Date(txn.createdAt).toLocaleDateString("fr-DZ") : "—"}
+                    </div>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:11,color:"var(--muted)",fontFamily:"var(--mono)",marginBottom:4}}>
+                        Réf: <span style={{color:"var(--indigo)",fontWeight:700}}>{txn.paymentId}</span>
+                        {txn.billId&&<> · Facture: <span style={{color:"var(--muted)"}}>{txn.billId}</span></>}
+                      </div>
+                      <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                        {txn.lines.map((l,j)=>(
+                          <span key={j} style={{fontSize:10,background:"rgba(46,201,92,.1)",
+                            border:"1px solid rgba(46,201,92,.2)",borderRadius:4,padding:"1px 6px",
+                            color:"var(--g)",fontFamily:"var(--mono)"}}>
+                            {l.label}: {fmt(l.appliedTTC)} DA
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <div style={{fontFamily:"var(--head)",fontSize:14,fontWeight:800,color:"var(--g)",minWidth:80,textAlign:"right"}}>
+                      {fmt(txn.totalApplied)} DA
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:8,paddingTop:8,
+                borderTop:"1px solid var(--bdr)",fontSize:13,fontWeight:800,alignItems:"center"}}>
+                <span style={{color:"var(--muted)"}}>Total réglé (période) :</span>
+                <span style={{fontFamily:"var(--mono)",color:"var(--g)"}}>
+                  {fmt(periodPayTxns.reduce((s,t)=>s+t.totalApplied,0))} DA
+                </span>
+              </div>
+            </div>
+          )}
+
+
+          {/* Print-only signature footer */}
+          <div className="print-only inv-print-footer" style={{padding:"0 20px 20px"}}>
+            <div style={{display:"flex",justifyContent:"flex-start",paddingLeft:"8%",marginTop:24}}>
+              <div style={{textAlign:"center",minWidth:200}}>
+                <div style={{fontSize:13,fontWeight:700,marginBottom:60,color:"#333",textTransform:"uppercase"}}>Le Directeur</div>
+                <div style={{borderTop:"1px solid #333",paddingTop:5,fontSize:11,color:"#555"}}>Signature &amp; Cachet</div>
+              </div>
+            </div>
+            <div style={{marginTop:30,fontSize:9,color:"#777",textAlign:"center",borderTop:"1px solid #ddd",paddingTop:10}}>
+              {cof(company,'name')} — {cof(company,'address')} — Tél: {cof(company,'phone')} — {cof(company,'email')}<br/>
+              NIF Établissement: [NIF] · RC: [RC] · Code Wilaya: {cof(company,'code')}
+            </div>
+          </div>
+
+          <div className="print-hide" style={{padding:"16px 20px",borderTop:"1px solid var(--bdr)",display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
+            {/* Always-visible: generate / update button */}
+            {totalCost>0&&!(currentInv?.status==="paid"&&(c.vatSubject?totalCost*1.19:totalCost)<=(currentInv.paidAmount||0))&&(
+              <button className="btn bp bsm" onClick={()=>generateInvoice(c,totalCost)}>
+                🧾 {currentInv?"Mettre à jour la facture":"Générer la facture"}
+              </button>
+            )}
+            {/* Paid banner — always visible when invoice is paid */}
+            {currentInv?.status==="paid"&&(
+              <div style={{display:"flex",alignItems:"center",gap:10,background:"rgba(46,201,92,.08)",border:"1px solid rgba(46,201,92,.3)",borderRadius:8,padding:"8px 14px",flex:1}}>
+                <span style={{fontWeight:700,color:"var(--g)",fontSize:13}}>✅ Facture soldée</span>
+                {currentInv.paidAt&&<span style={{fontSize:11,color:"var(--muted)"}}>le {currentInv.paidAt}</span>}
+                <div style={{marginLeft:"auto",display:"flex",gap:8}}>
+                  <button className="btn bsm" style={{background:"var(--g)",color:"#fff",borderColor:"var(--g)"}}
+                    onClick={downloadOfficialPDF} disabled={entries.length===0}>📥 Télécharger PDF</button>
+                  <button className="btn bg bsm" onClick={downloadOfficialWord} disabled={entries.length===0}>📄 Word</button>
+                </div>
+              </div>
+            )}
+            {/* Actions for unpaid / partial invoices */}
+            {currentInv&&currentInv.status!=="paid"&&(
+              <>
+                {(currentInv.status==="pending"||currentInv.status==="partial")&&(
+                  <button className="btn be bsm" onClick={()=>markOverdue(currentInv)}>🔴 Marquer Impayée</button>
+                )}
+                <div style={{display:"flex",gap:8,marginLeft:"auto",alignItems:"center"}}>
+                  <button className="btn bg bsm" onClick={downloadOfficialPDF} disabled={entries.length===0}
+                    title="Télécharger la facture officielle complète en PDF">📥 PDF</button>
+                  <button className="btn bi bsm" onClick={downloadOfficialWord} disabled={entries.length===0}
+                    title="Télécharger en format Word (.doc)">📄 Word</button>
+                </div>
+              </>
+            )}
+            {/* 💰 Bill-based payment — always available for convention/prepaid clients */}
+            {c&&(c.type==="convention"||c.type==="prepaid"||c.type==="rotation")&&(
+              <button className="btn bsm"
+                style={{background:"#0891b2",color:"#fff",borderColor:"#0891b2",
+                  opacity:billPayLoading ? 0.6 : 1}}
+                disabled={billPayLoading}
+                onClick={()=>openBillPayModal(c)}
+                title="Régler une facture via le système de paiement (Montant libre, Par décharge, Paiement intégral)">
+                💰 Régler Facture
+              </button>
+            )}
+            {currentInv&&(
+              <div style={{width:"100%",display:"flex",justifyContent:"flex-end",marginTop:2}}>
+                <button className="btn bsm"
+                  style={{background:"#25d366",color:"#fff",borderColor:"#25d366",display:"flex",alignItems:"center",gap:6}}
+                  onClick={()=>{setSmsInvCopied(false);setSmsInvModal({inv:currentInv,cl:c,totalHT:totalCost,totalTTC:c.vatSubject?totalCost*1.19:totalCost});}}
+                  title="Envoyer la facture par SMS ou WhatsApp">
+                  📱 Envoyer SMS / WhatsApp
+                </button>
+              </div>
+            )}
+            <div style={{fontSize:11,color:"var(--muted)",width:"100%",marginTop:4}}>Réf: {invNum}</div>
+          </div>
+        </div>
+        </div>
+      )}
+        </>
+      )}
+
+      {/* ── PAYMENT MODAL ── */}
+      {notifModal&&(()=>{
+        const {cl,limitPct,limitData}=notifModal;
+        const isUrgent=limitPct>=100;
+        const isHigh=limitPct>=90&&limitPct<100;
+        const accentColor=isUrgent?"var(--err)":isHigh?"#f97316":"var(--warn)";
+        const smsMsg=isUrgent
+          ?`Madame/Monsieur,\n\nNous vous informons que votre limite contractuelle de déchargement (${limitData.fmtLim}) a été atteinte (${limitPct}% utilisé).\n\nMerci de contacter notre service pour régulariser votre situation avant tout nouveau dépôt.\n\nCETManager Démo — ${new Date().toLocaleDateString("fr-FR")}`
+          :`Madame/Monsieur,\n\nVous avez utilisé ${limitPct}% de votre limite contractuelle de déchargement (${limitData.fmtUsed} sur ${limitData.fmtLim}). Il vous reste ${limitData.fmtRem}.\n\nMerci de prendre les dispositions nécessaires.\n\nCETManager Démo — ${new Date().toLocaleDateString("fr-FR")}`;
+        const mailSubject=isUrgent?`Alerte : Limite de déchargement atteinte — ${cl.name}`:`Avis : Limite de déchargement proche — ${cl.name}`;
+        const mailBody=encodeURIComponent(smsMsg);
+        const copyMsg=()=>{navigator.clipboard.writeText(smsMsg);setNotifCopied(true);setTimeout(()=>setNotifCopied(false),2500);};
+        return (
+          <div className="ov">
+            <div className="modal" style={{maxWidth:520}}>
+              <div className="mh">
+                <span className="mh-title">{isUrgent?"⚠️ Alerte limite atteinte":"📨 Notification limite proche"}</span>
+                <button className="btn bg bsm" onClick={()=>setNotifModal(null)}>✕</button>
+              </div>
+              <div className="mb2">
+                {/* Alert banner */}
+                <div style={{background:isUrgent?"rgba(239,68,68,.08)":isHigh?"rgba(249,115,22,.08)":"rgba(234,179,8,.08)",
+                  border:`1px solid ${accentColor}`,borderRadius:10,padding:"12px 14px",marginBottom:14,display:"flex",alignItems:"center",gap:10}}>
+                  <span style={{fontSize:24}}>{isUrgent?"🔴":isHigh?"🟠":"🟡"}</span>
+                  <div>
+                    <div style={{fontWeight:700,color:accentColor,fontSize:13}}>{cl.name}</div>
+                    <div style={{fontSize:12,color:"var(--muted)",marginTop:2}}>
+                      {limitData.fmtUsed} utilisé sur {limitData.fmtLim} — <strong style={{color:accentColor}}>{limitPct}%</strong>
+                      {!isUrgent&&<> · Reste : <strong>{limitData.fmtRem}</strong></>}
+                    </div>
+                    {/* Mini progress bar */}
+                    <div style={{height:5,background:"var(--bdr)",borderRadius:4,marginTop:6,overflow:"hidden"}}>
+                      <div style={{height:"100%",width:`${limitPct}%`,background:accentColor,borderRadius:4,transition:"width .4s"}}/>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Contact info */}
+                <div className="cost-box mb3">
+                  <div className="cl"><span className="clb">📞 Téléphone</span><span className="clv mn">{cl.phone||<em style={{color:"var(--muted)"}}>Non renseigné</em>}</span></div>
+                  {cl.address&&<div className="cl"><span className="clb">📍 Adresse</span><span className="clv mn">{cl.address}</span></div>}
+                </div>
+
+                {/* Message preview */}
+                <div style={{marginBottom:14}}>
+                  <div style={{fontSize:11,fontWeight:600,color:"var(--muted)",marginBottom:6,textTransform:"uppercase",letterSpacing:.5}}>Message à envoyer</div>
+                  <div style={{background:"var(--bg2)",border:"1px solid var(--bdr)",borderRadius:8,padding:"10px 12px",
+                    fontSize:12,lineHeight:1.7,whiteSpace:"pre-wrap",fontFamily:"var(--mono)",color:"var(--tx)"}}>
+                    {smsMsg}
+                  </div>
+                </div>
+
+                {/* Action buttons */}
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                  <button className="btn bg" style={{flex:1,fontSize:11,justifyContent:"center",display:"flex",alignItems:"center",gap:6}}
+                    onClick={copyMsg}>
+                    {notifCopied?"✅ Copié !":"📋 Copier le message"}
+                  </button>
+                  {cl.phone&&(
+                    <a href={`sms:${cl.phone.replace(/\s/g,"")}`}
+                      style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                        padding:"8px 14px",borderRadius:8,border:"1px solid var(--bdr)",
+                        background:"#25d366",color:"#fff",fontSize:11,fontWeight:600,textDecoration:"none",cursor:"pointer"}}>
+                      💬 Envoyer SMS
+                    </a>
+                  )}
+                  <a href={`mailto:?subject=${encodeURIComponent(mailSubject)}&body=${mailBody}`}
+                    style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                      padding:"8px 14px",borderRadius:8,border:"1px solid var(--bdr)",
+                      background:"#4f46e5",color:"#fff",fontSize:11,fontWeight:600,textDecoration:"none",cursor:"pointer"}}>
+                    ✉️ Ouvrir e-mail
+                  </a>
+                </div>
+                {!cl.phone&&<div style={{fontSize:10,color:"var(--muted)",marginTop:8}}>⚠️ Aucun numéro de téléphone enregistré pour ce client.</div>}
+              </div>
+              <div className="mf">
+                <button className="btn bg" onClick={()=>setNotifModal(null)}>Fermer</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {smsInvModal&&(()=>{
+        const {inv,cl,totalHT,totalTTC}=smsInvModal;
+        const resteDu=Math.max(0,inv.totalAmount-(inv.paidAmount||0));
+        const isPaid=inv.status==="paid";
+        const periodFmt=(()=>{const [y,m]=inv.month.split("-");const mNames=["Janvier","Février","Mars","Avril","Mai","Juin","Juillet","Août","Septembre","Octobre","Novembre","Décembre"];return `${mNames[parseInt(m,10)-1]} ${y}`;})();
+        const fmtDA=n=>new Intl.NumberFormat("fr-DZ",{minimumFractionDigits:2,maximumFractionDigits:2}).format(n)+" DA";
+        const coPhone=cof(company,"phone")||"";
+        const coEmail=cof(company,"email")||"";
+        const msg=isPaid
+          ?`CETManager Démo — Reçu de paiement\n\nClient : ${cl.name}\nPériode : ${periodFmt}\nN° Facture : ${inv.id}\n${cl.vatSubject?`Montant HT : ${fmtDA(totalHT)}\nTVA 19% : ${fmtDA(totalHT*0.19)}\n`:""}TOTAL RÉGLÉ : ${fmtDA(inv.totalAmount)}\n\nVotre facture est entièrement soldée. Merci pour votre règlement.\n\n${coPhone?`Tél : ${coPhone}`:""}\nCETManager — ${new Date().toLocaleDateString("fr-FR")}`
+          :`CETManager Démo — Avis de facturation\n\nClient : ${cl.name}\nPériode : ${periodFmt}\nN° Facture : ${inv.id}\n${cl.vatSubject?`Montant HT : ${fmtDA(totalHT)}\nTVA 19% : ${fmtDA(totalHT*0.19)}\n`:""}`+
+           `NET À PAYER : ${fmtDA(totalTTC)}`+
+           ((inv.paidAmount||0)>0?`\nDéjà réglé : ${fmtDA(inv.paidAmount)}\nReste dû : ${fmtDA(resteDu)}`:"") +
+           `\n\nMerci de procéder au règlement dans les meilleurs délais.${coPhone?`\nContact : ${coPhone}`:""}${coEmail?` | ${coEmail}`:""}\nCETManager — ${new Date().toLocaleDateString("fr-FR")}`;
+        const rawPhone=(cl.phone||"").replace(/\s/g,"");
+        const waPhone=rawPhone.startsWith("0")?`213${rawPhone.slice(1)}`:rawPhone.replace(/^\+/,"");
+        const mailSubj=isPaid?`Reçu de paiement — ${cl.name} — ${periodFmt}`:`Avis de facturation — ${cl.name} — ${periodFmt}`;
+        const copyMsg=()=>{navigator.clipboard.writeText(msg);setSmsInvCopied(true);setTimeout(()=>setSmsInvCopied(false),2500);};
+        return (
+          <div className="ov">
+            <div className="modal" style={{maxWidth:540}}>
+              <div className="mh">
+                <span className="mh-title">📱 {isPaid?"Envoyer reçu":"Envoyer facture"} par SMS</span>
+                <button className="btn bg bsm" onClick={()=>setSmsInvModal(null)}>✕</button>
+              </div>
+              <div className="mb2">
+                {/* Header info strip */}
+                <div className="cost-box mb3" style={{marginBottom:14}}>
+                  <div className="cl"><span className="clb">👤 Client</span><span className="clv fw7">{cl.name}</span></div>
+                  <div className="cl"><span className="clb">📅 Période</span><span className="clv">{periodFmt}</span></div>
+                  <div className="cl"><span className="clb">🧾 Référence</span><span className="clv mn">{inv.id}</span></div>
+                  <div className="cl"><span className="clb">{isPaid?"✅ Soldé":"💰 À payer"}</span>
+                    <span className="clv fw7" style={{color:isPaid?"var(--g)":"var(--err)"}}>
+                      {isPaid?fmtDA(inv.totalAmount):fmtDA(resteDu)}
+                    </span>
+                  </div>
+                  <div className="cl"><span className="clb">📞 Téléphone</span>
+                    <span className="clv mn">{cl.phone||<em style={{color:"var(--muted)"}}>Non renseigné</em>}</span>
+                  </div>
+                </div>
+                {/* Message preview */}
+                <div style={{marginBottom:14}}>
+                  <div style={{fontSize:11,fontWeight:600,color:"var(--muted)",marginBottom:6,textTransform:"uppercase",letterSpacing:.5}}>Message à envoyer</div>
+                  <div style={{background:"var(--bg2)",border:"1px solid var(--bdr)",borderRadius:8,padding:"10px 12px",
+                    fontSize:12,lineHeight:1.7,whiteSpace:"pre-wrap",fontFamily:"var(--mono)",color:"var(--tx)"}}>
+                    {msg}
+                  </div>
+                </div>
+                {/* Action buttons */}
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                  <button className="btn bg" style={{flex:1,fontSize:11,justifyContent:"center",display:"flex",alignItems:"center",gap:6}}
+                    onClick={copyMsg}>
+                    {smsInvCopied?"✅ Copié !":"📋 Copier le message"}
+                  </button>
+                  {cl.phone&&(
+                    <a href={`sms:${rawPhone}?body=${encodeURIComponent(msg)}`}
+                      style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                        padding:"8px 14px",borderRadius:8,border:"1px solid #ccc",
+                        background:"#1a73e8",color:"#fff",fontSize:11,fontWeight:600,textDecoration:"none"}}>
+                      💬 SMS natif
+                    </a>
+                  )}
+                  {cl.phone&&(
+                    <a href={`https://wa.me/${waPhone}?text=${encodeURIComponent(msg)}`}
+                      target="_blank" rel="noreferrer"
+                      style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                        padding:"8px 14px",borderRadius:8,border:"1px solid #25d366",
+                        background:"#25d366",color:"#fff",fontSize:11,fontWeight:600,textDecoration:"none"}}>
+                      🟢 WhatsApp
+                    </a>
+                  )}
+                  <a href={`mailto:${cl.email||""}?subject=${encodeURIComponent(mailSubj)}&body=${encodeURIComponent(msg)}`}
+                    style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                      padding:"8px 14px",borderRadius:8,border:"1px solid var(--indigo)",
+                      background:"var(--indigo)",color:"#fff",fontSize:11,fontWeight:600,textDecoration:"none"}}>
+                    ✉️ E-mail
+                  </a>
+                </div>
+                {!cl.phone&&<div style={{fontSize:10,color:"var(--muted)",marginTop:8}}>⚠️ Aucun numéro de téléphone enregistré pour ce client.</div>}
+              </div>
+              <div className="mf">
+                <button className="btn bg" onClick={()=>setSmsInvModal(null)}>Fermer</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Bill-Payment Modal (Phase 3B) — Montant libre / Par décharge / Paiement intégral ── */}
+      {billPayModal&&(()=>{
+        const { bill, cl } = billPayModal;
+        const discs = (bill.discharges || []).filter(d => parseFloat(d.remaining_ttc) > 0.005);
+        const billRemaining = bill.remainingTotal || 0;
+        const enteredAmt = billPayStrategy === "integral"
+          ? billRemaining
+          : (parseFloat(billPayAmt) || 0);
+        const canPreview = billPayStrategy === "specifique"
+          ? billPaySelDiscs.length > 0
+          : enteredAmt > 0 && enteredAmt <= billRemaining + 0.01;
+        return (
+          <div className="ov">
+            <div className="modal" style={{maxWidth:560}}>
+              <div className="mh">
+                <span className="mh-title">💰 Régler une Facture</span>
+                <button className="btn bg bsm" onClick={()=>setBillPayModal(null)}>✕</button>
+              </div>
+              <div className="mb2">
+
+                {/* Bill summary */}
+                <div className="cost-box mb4">
+                  <div className="cl"><span className="clb">Client</span><span className="clv mn fw7">{cl.name}</span></div>
+                  <div className="cl"><span className="clb">Facture</span><span className="clv mn tmu" style={{fontSize:11}}>{bill.id}</span></div>
+                  <div className="cl"><span className="clb">Total facturé</span><span className="clv mn">{fmt(bill.total_ttc)}</span></div>
+                  <div className="cl"><span className="clb">Déjà réglé</span><span className="clv mn" style={{color:"var(--g)"}}>{fmt(Math.max(0, (bill.total_ttc||0) - billRemaining))}</span></div>
+                  <div className="cl ct"><span style={{fontWeight:700}}>Reste à régler</span><span className="ctv">{fmt(billRemaining)}</span></div>
+                </div>
+
+                {/* Strategy toggle */}
+                <div className="field mb3" style={{marginBottom:14}}>
+                  <label>Mode de sélection du paiement</label>
+                  <div className="seg" style={{marginTop:4,width:"100%"}}>
+                    {[
+                      {id:"libre",     label:"💵 Montant libre"},
+                      {id:"specifique",label:"☑️ Par décharge"},
+                      {id:"integral",  label:"✅ Intégral"},
+                    ].map(s=>(
+                      <button key={s.id}
+                        className={`seg-btn${billPayStrategy===s.id?" active":""}`}
+                        onClick={()=>{
+                          setBillPayStrategy(s.id);
+                          setBillPayPreview(null);
+                          setBillPayPrinted(false);
+                          if(s.id==="specifique") setBillPaySelDiscs([]);
+                        }}>
+                        {s.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Montant libre — amount input */}
+                {billPayStrategy==="libre"&&(
+                  <div className="field mb3" style={{marginBottom:14}}>
+                    <label>Montant versé (DA TTC)</label>
+                    <input className="fi" type="number" min="0.01" step="0.01"
+                      value={billPayAmt} placeholder={`Max ${fmt(billRemaining)} DA`}
+                      onChange={e=>{setBillPayAmt(e.target.value); setBillPayPreview(null); setBillPayPrinted(false);}}/>
+                    {parseFloat(billPayAmt)>billRemaining+0.01&&(
+                      <div style={{fontSize:10,color:"var(--err)",marginTop:3}}>⚠ Dépasse le reste dû ({fmt(billRemaining)} DA)</div>
+                    )}
+                  </div>
+                )}
+
+                {/* Paiement intégral — locked amount display */}
+                {billPayStrategy==="integral"&&(
+                  <div style={{background:"rgba(46,201,92,.06)",border:"1px solid rgba(46,201,92,.2)",borderRadius:10,padding:"12px 14px",marginBottom:14}}>
+                    <div style={{fontWeight:700,fontSize:12,color:"var(--g)",marginBottom:4}}>✅ Paiement intégral</div>
+                    <div style={{fontSize:12}}>Montant à régler : <strong className="mn">{fmt(billRemaining)} DA</strong> — solde complet de cette facture</div>
+                  </div>
+                )}
+
+                {/* Par décharge spécifique — discharge checklist */}
+                {billPayStrategy==="specifique"&&(
+                  <div style={{marginBottom:14}}>
+                    <div style={{fontWeight:600,fontSize:12,marginBottom:8}}>Sélectionner les dépôts à solder :</div>
+                    {discs.length===0
+                      ? <div style={{textAlign:"center",padding:20,color:"var(--muted)",fontSize:12}}>Aucun dépôt à régler dans cette facture.</div>
+                      : <div style={{maxHeight:200,overflowY:"auto",border:"1px solid var(--bdr)",borderRadius:8}}>
+                          {discs.map(d=>{
+                            const rem = Math.max(0, parseFloat(d.remaining_ttc));
+                            const chk = billPaySelDiscs.includes(d.id);
+                            return (
+                              <label key={d.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",
+                                borderBottom:"1px solid var(--bdr)",cursor:"pointer",
+                                background:chk?"rgba(99,102,241,.06)":"transparent"}}>
+                                <input type="checkbox" checked={chk}
+                                  onChange={()=>{
+                                    setBillPayPreview(null); setBillPayPrinted(false);
+                                    setBillPaySelDiscs(prev=>prev.includes(d.id)?prev.filter(x=>x!==d.id):[...prev,d.id]);
+                                  }}/>
+                                <div style={{flex:1,fontSize:12}}>
+                                  <div className="fw7">{fmtTs(d.ts)} — {wasteTypes.find(w=>w.id===d.waste_type)?.label||d.waste_type}</div>
+                                  <div style={{color:"var(--muted)",fontSize:11}}>
+                                    {d.pay_method==="rotation"?"🔄 Rotation":"⚖️ Net: "+fmtN(d.net)+" t"}
+                                    {" · "}{fmt(d.unit_price)} DA/{d.pay_method==="rotation"?"rot.":"t"}
+                                  </div>
+                                </div>
+                                <div style={{fontSize:12,fontFamily:"var(--mono)",color:"var(--err)",fontWeight:700}}>
+                                  {fmt(rem)} DA
+                                </div>
+                              </label>
+                            );
+                          })}
+                        </div>
+                    }
+                    {billPaySelDiscs.length>0&&(
+                      <div style={{fontSize:12,marginTop:8,fontWeight:700,color:"var(--indigo)"}}>
+                        {billPaySelDiscs.length} dépôt(s) — {fmt(
+                          discs.filter(d=>billPaySelDiscs.includes(d.id))
+                            .reduce((s,d)=>s+Math.max(0,parseFloat(d.remaining_ttc)),0)
+                        )} DA
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Preview result */}
+                {billPayPreview&&(
+                  <div style={{background:"rgba(99,102,241,.06)",border:"1px solid rgba(99,102,241,.25)",borderRadius:10,padding:"12px 14px",marginBottom:14}}>
+                    <div style={{fontWeight:700,fontSize:12,color:"var(--indigo)",marginBottom:8}}>📊 Prévisualisation de l'allocation FIFO</div>
+                    {billPayPreview.receiptByType.map((r,i)=>(
+                      <div key={i} style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:3}}>
+                        <span style={{color:"var(--muted)"}}>
+                          {r.partial&&<strong style={{color:"var(--warn)"}}>[Partiel] </strong>}
+                          {wasteTypes.find(w=>w.id===r.wasteType)?.label||r.wasteType}
+                          {r.billingMode==="rotation"
+                            ? ` — ${r.qty} rot.`
+                            : ` — ${r.qty.toLocaleString("fr-FR",{maximumFractionDigits:3})} t`}
+                          {" @ "}{fmt(r.unitPrice)} DA
+                          {r.note&&<span style={{fontSize:10,color:"var(--warn)"}}> ({r.note})</span>}
+                        </span>
+                        <span className="mn fw7">{fmt(r.montantTTC)} DA</span>
+                      </div>
+                    ))}
+                    <div style={{display:"flex",justifyContent:"space-between",fontSize:13,fontWeight:800,
+                      borderTop:"1px solid rgba(99,102,241,.2)",paddingTop:6,marginTop:4}}>
+                      <span>Total appliqué</span>
+                      <span className="mn" style={{color:"var(--indigo)"}}>{fmt(billPayPreview.totalApplied)} DA</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Printed confirmation */}
+                {billPayPrinted&&(
+                  <div style={{background:"rgba(46,201,92,.08)",border:"1px solid rgba(46,201,92,.3)",borderRadius:10,padding:"12px 14px",marginTop:8}}>
+                    <div style={{fontWeight:700,fontSize:12,color:"var(--g)",marginBottom:4}}>✅ Facture générée et téléchargée</div>
+                    <div style={{fontSize:12,color:"var(--muted)"}}>Confirmez la réception du paiement pour l'enregistrer dans le système. Si vous changez la sélection, la facture devra être régénérée.</div>
+                  </div>
+                )}
+              </div>
+
+              <div className="mf">
+                <button className="btn bg" onClick={()=>setBillPayModal(null)}>Annuler</button>
+                {/* Step 1: Preview */}
+                {!billPayPreview&&(
+                  <button className="btn bsm"
+                    style={{background:"var(--indigo)",color:"#fff",borderColor:"var(--indigo)",opacity:canPreview?1:.5}}
+                    disabled={!canPreview||billPayLoading}
+                    onClick={doBillPayPreview}>
+                    {billPayLoading?"⏳ Calcul…":"🔍 Prévisualiser l'allocation"}
+                  </button>
+                )}
+                {/* Step 2: Generate bill document */}
+                {billPayPreview&&!billPayPrinted&&(
+                  <button className="btn bsm"
+                    style={{background:"var(--indigo)",color:"#fff",borderColor:"var(--indigo)"}}
+                    disabled={billPayLoading}
+                    onClick={doBillPayGenerate}>
+                    🖨️ Générer la facture de ce paiement
+                  </button>
+                )}
+                {/* Step 3: Confirm (only after document generated) */}
+                {billPayPrinted&&(
+                  <button className="btn bsm"
+                    style={{background:"var(--g)",color:"#fff",borderColor:"var(--g)",
+                      opacity:billPayLoading ? 0.6 : 1}}
+                    disabled={billPayLoading}
+                    onClick={doBillPayConfirm}>
+                    {billPayLoading?"⏳ Enregistrement…":"✓ Confirmer la réception du paiement"}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+    </>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   COMPLIANCE PANEL — Loi 18-07 + Loi 25-11
+═══════════════════════════════════════════════════════════════════════════ */
+function CompliancePanel({ authUser, isAdmin, clients, updateClient }) {
+  const [consentStatus,  setConsentStatus]  = useState(null);
+  const [myData,         setMyData]         = useState(null);
+  const [myDataLoading,  setMyDataLoading]  = useState(false);
+  const [requests,       setRequests]       = useState([]);
+  const [auditLog,       setAuditLog]       = useState([]);
+  const [auditLoading,   setAuditLoading]   = useState(false);
+  const [breachReport,   setBreachReport]   = useState(null);
+  const [brLoading,      setBrLoading]      = useState(false);
+  const [reqForm,        setReqForm]        = useState({type:"access",note:""});
+  const [reqMsg,         setReqMsg]         = useState(null);
+  const [purgeMsg,       setPurgeMsg]       = useState(null);
+  const [activeView,     setActiveView]     = useState("status");
+
+  const fmtDate = d => d ? new Date(d).toLocaleString("fr-DZ") : "—";
+
+  useEffect(() => {
+    apiFetch(`/api/compliance/consent/${authUser.id}`)
+      .then(r=>r.json()).then(setConsentStatus).catch(()=>{});
+    if (isAdmin) {
+      apiFetch('/api/compliance/data-requests').then(r=>r.json()).then(d=>setRequests(Array.isArray(d)?d:[])).catch(()=>{});
+    }
+  }, [authUser.id, isAdmin]);
+
+  const loadMyData = async () => {
+    setMyDataLoading(true);
+    const r = await apiFetch(`/api/compliance/my-data/${authUser.id}`);
+    const d = await r.json();
+    setMyData(d);
+    setMyDataLoading(false);
+  };
+
+  const loadAuditLog = async () => {
+    setAuditLoading(true);
+    const r = await apiFetch('/api/compliance/audit-log?limit=50');
+    const d = await r.json();
+    setAuditLog(d.rows||[]);
+    setAuditLoading(false);
+  };
+
+  const loadBreachReport = async () => {
+    setBrLoading(true);
+    const r = await apiFetch('/api/compliance/breach-report');
+    const d = await r.json();
+    setBreachReport(d);
+    setBrLoading(false);
+  };
+
+  const submitRequest = async () => {
+    setReqMsg(null);
+    const r = await apiFetch('/api/compliance/data-request', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ userId: authUser.id, requestType: reqForm.type, subjectName: authUser.name, subjectEmail: authUser.email, note: reqForm.note }),
+    });
+    const d = await r.json();
+    if (r.ok) { setReqMsg({t:"ok",m:`Demande #${d.requestId} enregistrée. Délai de réponse : 30 jours.`}); setReqForm({type:"access",note:""}); }
+    else setReqMsg({t:"err",m:d.error||"Erreur serveur."});
+  };
+
+  const handleRequest = async (id, status) => {
+    await apiFetch(`/api/compliance/data-requests/${id}`, {
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ status, handledBy: authUser.id }),
+    });
+    setRequests(p=>p.map(r=>r.id===id?{...r,status,handled_by:authUser.id,handled_at:new Date().toISOString()}:r));
+  };
+
+  const purgeOld = async () => {
+    if (!window.confirm("Confirmer la purge des données de déchargement de plus de 10 ans ?")) return;
+    const r = await apiFetch('/api/compliance/purge-expired', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ adminUserId: authUser.id, retentionYears: 10 }),
+    });
+    const d = await r.json();
+    setPurgeMsg(r.ok ? `✅ ${d.deletedCount} entrée(s) supprimées (avant ${d.cutoffDate}).` : `Erreur: ${d.error}`);
+  };
+
+  const statusColor = s => ({pending:"var(--warn)",processing:"var(--info)",completed:"var(--g)",rejected:"var(--err)"}[s]||"var(--muted)");
+  const eventColor  = e => e.includes("FAIL")||e.includes("DENY") ? "var(--err)" : e.includes("SUCCESS")||e.includes("GIVEN") ? "var(--g)" : "var(--info)";
+
+  const views = isAdmin
+    ? [["status","🛡 Statut"],["clients","🏢 Clients"],["requests","📋 Demandes"],["auditlog","📜 Journal"],["breach","🚨 Rapport"],["purge","🗑 Rétention"]]
+    : [["status","🛡 Statut"],["mydata","📦 Mes données"],["request","📝 Mes droits"]];
+
+  return (
+    <div>
+      <div className="settings-title">🛡️ {isAdmin ? "Conformité & Sécurité" : "Mes données & droits"}</div>
+      <div className="settings-sub">{isAdmin ? "Loi 18-07 · Loi 25-11 — Tableau de bord conformité" : "Loi 18-07 Art.20-25 — Exercer vos droits sur vos données personnelles"}</div>
+
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:20}}>
+        {views.map(([id,lbl])=>(
+          <button key={id} onClick={()=>setActiveView(id)} style={{padding:"6px 14px",borderRadius:20,border:"1px solid var(--bdr)",background:activeView===id?"var(--g)":"var(--s2)",color:activeView===id?"#fff":"var(--txt)",fontWeight:activeView===id?700:400,cursor:"pointer",fontSize:12}}>
+            {lbl}
+          </button>
+        ))}
+      </div>
+
+      {activeView==="status" && (
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div style={{background:"var(--s2)",borderRadius:10,padding:"14px 16px",border:"1px solid var(--bdr)"}}>
+            <div style={{fontWeight:700,fontSize:13,marginBottom:8}}>📜 Consentement (Loi 18-07, Art. 7)</div>
+            {consentStatus ? (
+              consentStatus.consented
+                ? <div className="alrt as" style={{marginBottom:0}}><span>✅</span><span>Politique v{consentStatus.record?.policy_ver} acceptée le {fmtDate(consentStatus.record?.consented_at)}</span></div>
+                : <div className="alrt ae" style={{marginBottom:0}}><span>⚠</span><span>Consentement non enregistré pour la politique actuelle (v{consentStatus.currentPolicyVersion})</span></div>
+            ) : <span style={{fontSize:12,color:"var(--muted)"}}>Chargement…</span>}
+          </div>
+
+          {isAdmin && (
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10}}>
+              {[
+                ["📋","Demandes en attente",requests.filter(r=>r.status==="pending").length,"var(--warn)"],
+                ["📜","Événements d'audit",auditLog.length||"Charger →","var(--info)"],
+                ["🔐","Politique de mdp","8 car. min — lettres+chiffres","var(--g)"],
+                ["🌐","Hébergement","Replit/USA — ⚠️ Auth. ANPDP requise","var(--err)"],
+              ].map(([ic,label,val,col])=>(
+                <div key={label} style={{background:"var(--s2)",borderRadius:8,padding:"12px 14px",border:"1px solid var(--bdr)"}}>
+                  <div style={{fontSize:20,marginBottom:4}}>{ic}</div>
+                  <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".06em",marginBottom:2}}>{label}</div>
+                  <div style={{fontWeight:700,fontSize:13,color:col}}>{val}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{background:"rgba(240,130,0,.07)",border:"1px solid rgba(240,130,0,.25)",borderRadius:8,padding:"12px 14px",fontSize:12}}>
+            <div style={{fontWeight:700,marginBottom:6}}>⚠️ Actions ANPDP requises avant production officielle</div>
+            {["Désigner un Délégué à la Protection des Données (DPD)","Soumettre la déclaration de traitements à l'ANPDP","Obtenir l'autorisation de transfert transfrontalier (hébergement Replit/USA)"].map(a=>(
+              <div key={a} style={{display:"flex",gap:6,alignItems:"flex-start",marginBottom:4}}>
+                <span style={{color:"var(--err)",flexShrink:0}}>❌</span><span style={{color:"var(--muted)"}}>{a}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {activeView==="mydata" && (
+        <div>
+          <div style={{marginBottom:12,fontSize:13,color:"var(--muted)"}}>Droit d'accès — Art. 20 Loi 18-07. Export de toutes vos données personnelles enregistrées dans le système.</div>
+          <button className="btn bp" onClick={loadMyData} disabled={myDataLoading} style={{marginBottom:16}}>
+            {myDataLoading?"Chargement…":"📦 Exporter mes données (JSON)"}
+          </button>
+          {myData && (
+            <div>
+              <div style={{background:"var(--s2)",borderRadius:8,padding:"12px 14px",border:"1px solid var(--bdr)",marginBottom:10}}>
+                <div style={{fontWeight:700,fontSize:12,marginBottom:6,color:"var(--muted)"}}>PROFIL</div>
+                {Object.entries(myData.profile||{}).map(([k,v])=>(
+                  <div key={k} style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"3px 0",borderBottom:"1px solid var(--bdr)"}}>
+                    <span style={{color:"var(--muted)",fontFamily:"var(--mono)",fontSize:10}}>{k}</span>
+                    <span style={{fontWeight:600}}>{String(v||"—")}</span>
+                  </div>
+                ))}
+              </div>
+              <div style={{background:"var(--s2)",borderRadius:8,padding:"12px 14px",border:"1px solid var(--bdr)",marginBottom:10}}>
+                <div style={{fontWeight:700,fontSize:12,marginBottom:4,color:"var(--muted)"}}>CONSENTEMENTS ({myData.consentHistory?.length||0})</div>
+                {myData.consentHistory?.map((c,i)=><div key={i} style={{fontSize:11,color:"var(--muted)",padding:"2px 0"}}>v{c.policy_ver} — {fmtDate(c.consented_at)}</div>)}
+              </div>
+              <div style={{background:"var(--s2)",borderRadius:8,padding:"12px 14px",border:"1px solid var(--bdr)"}}>
+                <div style={{fontWeight:700,fontSize:12,marginBottom:4,color:"var(--muted)"}}>DÉCHARGEMENTS OPÉRÉS ({myData.operatorDischarges?.length||0})</div>
+                <div style={{fontSize:11,color:"var(--muted)"}}>{myData.operatorDischarges?.length||0} enregistrement(s)</div>
+              </div>
+              <div style={{marginTop:10,fontSize:11,color:"var(--muted)"}}>Export généré le {fmtDate(myData.exportedAt)} · Base légale : {myData.legalBasis}</div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeView==="request" && (
+        <div>
+          <div style={{marginBottom:12,fontSize:13,color:"var(--muted)"}}>Exercez vos droits conformément aux Art. 20-25 de la Loi 18-07. Délai de réponse : 30 jours maximum.</div>
+          <div className="fg" style={{gap:12,maxWidth:440}}>
+            <div className="field">
+              <label>Type de demande</label>
+              <select className="fi" value={reqForm.type} onChange={e=>setReqForm(f=>({...f,type:e.target.value}))}>
+                <option value="access">Droit d'accès (Art. 20) — Obtenir une copie de mes données</option>
+                <option value="rectification">Droit de rectification (Art. 21) — Corriger des données inexactes</option>
+                <option value="erasure">Droit à l'effacement (Art. 23) — Supprimer mes données</option>
+                <option value="portability">Droit à la portabilité — Recevoir mes données au format structuré</option>
+                <option value="objection">Droit d'opposition (Art. 22) — M'opposer à un traitement</option>
+              </select>
+            </div>
+            <div className="field">
+              <label>Détails / précisions (optionnel)</label>
+              <textarea className="fi" rows={3} value={reqForm.note} onChange={e=>setReqForm(f=>({...f,note:e.target.value}))} placeholder="Décrivez votre demande…" style={{resize:"vertical"}}/>
+            </div>
+            {reqMsg && <div className={`alrt ${reqMsg.t==="ok"?"as":"ae"}`}><span>{reqMsg.t==="ok"?"✅":"⚠"}</span><span>{reqMsg.m}</span></div>}
+            <button className="btn bp" style={{width:"fit-content"}} onClick={submitRequest}>📝 Soumettre la demande</button>
+          </div>
+        </div>
+      )}
+
+      {activeView==="requests" && isAdmin && (
+        <div>
+          <div style={{marginBottom:12,fontSize:13,color:"var(--muted)"}}>Demandes de droits des personnes concernées — Délai légal de traitement : 30 jours (Loi 18-07).</div>
+          {requests.length===0 ? <div className="alrt ai"><span>ℹ</span><span>Aucune demande en attente.</span></div> : (
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {requests.map(r=>(
+                <div key={r.id} style={{background:"var(--s2)",borderRadius:8,padding:"12px 14px",border:"1px solid var(--bdr)"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:6}}>
+                    <div>
+                      <span style={{fontWeight:700,fontSize:12,textTransform:"uppercase",color:"var(--info)"}}>{r.request_type}</span>
+                      {" · "}<span style={{fontSize:12}}>{r.subject_name||r.subject_email||r.user_id||"Anonyme"}</span>
+                    </div>
+                    <span style={{fontSize:11,fontWeight:700,color:statusColor(r.status)}}>{r.status}</span>
+                  </div>
+                  <div style={{fontSize:11,color:"var(--muted)",marginBottom:6}}>{fmtDate(r.requested_at)}{r.note ? ` — ${r.note}` : ""}</div>
+                  {r.status==="pending" && (
+                    <div style={{display:"flex",gap:6}}>
+                      <button className="btn bp" style={{fontSize:11,padding:"4px 10px"}} onClick={()=>handleRequest(r.id,"completed")}>✅ Traité</button>
+                      <button className="btn" style={{fontSize:11,padding:"4px 10px",color:"var(--err)",border:"1px solid var(--err)"}} onClick={()=>handleRequest(r.id,"rejected")}>❌ Rejeté</button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeView==="auditlog" && isAdmin && (
+        <div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+            <div style={{fontSize:13,color:"var(--muted)"}}>Journal d'audit sécurité — Loi 25-11 Art. 16 · Conservation 5 ans</div>
+            <button className="btn bp" style={{fontSize:11,padding:"5px 12px"}} onClick={loadAuditLog} disabled={auditLoading}>
+              {auditLoading?"Chargement…":"🔄 Charger"}
+            </button>
+          </div>
+          {auditLog.length===0 ? (
+            <div className="alrt ai"><span>ℹ</span><span>Cliquez sur Charger pour afficher les 50 derniers événements.</span></div>
+          ) : (
+            <div style={{display:"flex",flexDirection:"column",gap:4,maxHeight:400,overflowY:"auto"}}>
+              {auditLog.map(e=>(
+                <div key={e.id} style={{background:"var(--s2)",borderRadius:6,padding:"8px 12px",border:"1px solid var(--bdr)",fontSize:11,display:"grid",gridTemplateColumns:"140px 160px 1fr 70px",gap:6,alignItems:"center"}}>
+                  <span style={{color:"var(--muted)",fontFamily:"var(--mono)",fontSize:10}}>{new Date(e.ts).toLocaleString("fr-DZ")}</span>
+                  <span style={{fontWeight:700,color:eventColor(e.event_type),fontFamily:"var(--mono)",fontSize:10}}>{e.event_type}</span>
+                  <span style={{color:"var(--txt)"}}>{e.user_name||"—"} {e.detail ? `— ${e.detail}` : ""}</span>
+                  <span style={{textAlign:"right",color:e.outcome==="success"?"var(--g)":"var(--err)",fontSize:10,fontWeight:700}}>{e.outcome}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeView==="breach" && isAdmin && (
+        <div>
+          <div style={{marginBottom:12,fontSize:13,color:"var(--muted)"}}>Loi 25-11 Art. 18 — Rapport d'incident sur les 72 dernières heures (notification ANSSI obligatoire).</div>
+          <button className="btn bp" onClick={loadBreachReport} disabled={brLoading} style={{marginBottom:16}}>
+            {brLoading?"Génération…":"🚨 Générer le rapport d'incident"}
+          </button>
+          {breachReport && (
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              <div style={{background:"rgba(200,0,0,.06)",border:"1px solid rgba(200,0,0,.2)",borderRadius:8,padding:"12px 14px"}}>
+                <div style={{fontWeight:700,fontSize:12,marginBottom:6}}>Rapport généré le {fmtDate(breachReport.reportGeneratedAt)}</div>
+                <div style={{fontSize:12,color:"var(--muted)",marginBottom:4}}>Fenêtre : {fmtDate(breachReport.reportingWindowStart)} → maintenant</div>
+                <div style={{fontSize:11,color:"var(--muted)"}}>{breachReport.legalReference}</div>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+                {[["Total échecs",breachReport.summary?.totalFailures,"var(--err)"],["Échecs connexion",breachReport.summary?.loginFailures,"var(--warn)"],["Échecs mot de passe",breachReport.summary?.passwordFailures,"var(--info)"]].map(([l,v,c])=>(
+                  <div key={l} style={{background:"var(--s2)",borderRadius:8,padding:"10px 12px",border:"1px solid var(--bdr)",textAlign:"center"}}>
+                    <div style={{fontWeight:800,fontSize:22,color:c}}>{v??0}</div>
+                    <div style={{fontSize:10,color:"var(--muted)"}}>{l}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{background:"var(--s2)",borderRadius:8,padding:"12px 14px",border:"1px solid var(--bdr)",fontSize:11,color:"var(--muted)"}}>
+                <strong>Autorité de notification :</strong> {breachReport.reportingAuthority}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeView==="clients" && isAdmin && (
+        <div>
+          <div style={{marginBottom:12,fontSize:13,color:"var(--muted)"}}>
+            Registre des consentements clients — Loi 18-07 Art. 7. Chaque client doit avoir consenti avant toute opération de déchargement.
+          </div>
+
+          <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap"}}>
+            {[
+              ["Total clients",(clients||[]).length,"var(--info)"],
+              ["✅ Consentement donné",(clients||[]).filter(c=>c.consentGiven).length,"var(--g)"],
+              ["🔒 En attente",(clients||[]).filter(c=>!c.consentGiven).length,"var(--err)"],
+            ].map(([l,v,col])=>(
+              <div key={l} style={{background:"var(--s2)",borderRadius:8,padding:"10px 16px",border:"1px solid var(--bdr)",textAlign:"center",minWidth:130}}>
+                <div style={{fontWeight:800,fontSize:20,color:col}}>{v}</div>
+                <div style={{fontSize:10,color:"var(--muted)"}}>{l}</div>
+              </div>
+            ))}
+          </div>
+
+          {(clients||[]).length===0 ? (
+            <div className="alrt ai"><span>ℹ</span><span>Aucun client enregistré.</span></div>
+          ) : (
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {(clients||[]).filter(c=>c.type!=="daily").map(cl=>(
+                <div key={cl.id} style={{
+                  background:"var(--s2)",borderRadius:8,padding:"10px 14px",
+                  border:`1px solid ${cl.consentGiven?"rgba(46,201,92,.3)":"rgba(220,50,50,.25)"}`,
+                  display:"grid",gridTemplateColumns:"1fr auto",gap:10,alignItems:"center",
+                }}>
+                  <div>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
+                      <span style={{fontSize:12,fontWeight:700}}>{cl.name}</span>
+                      <span style={{fontSize:10,color:"var(--muted)",background:"var(--s1)",padding:"1px 6px",borderRadius:10,border:"1px solid var(--bdr)"}}>
+                        {cl.type==="convention"?"Conv. Tonnes":cl.type==="rotation"?"Conv. Rotation":cl.type==="prepaid"?"Prépayé":"Cash"}
+                      </span>
+                    </div>
+                    {cl.consentGiven ? (
+                      <div style={{fontSize:10,color:"var(--g)"}}>
+                        ✅ Accordé le {cl.consentDate ? new Date(cl.consentDate).toLocaleDateString("fr-DZ") : "—"}
+                        {cl.consentBy ? ` · par ${cl.consentBy}` : ""}
+                      </div>
+                    ) : (
+                      <div style={{fontSize:10,color:"var(--err)"}}>🔒 Consentement manquant — opérations bloquées</div>
+                    )}
+                  </div>
+                  <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                    {cl.consentGiven ? (
+                      <button
+                        className="btn bsm"
+                        style={{fontSize:11,padding:"3px 8px",color:"var(--err)",background:"transparent",border:"1px solid var(--err)"}}
+                        onClick={()=>{
+                          if (!window.confirm(`Révoquer le consentement de ${cl.name} ?`)) return;
+                          updateClient({...cl, consentGiven:false, consentDate:null, consentBy:null});
+                        }}>
+                        ↩ Révoquer
+                      </button>
+                    ) : (
+                      <button
+                        className="btn bp bsm"
+                        style={{fontSize:11,padding:"3px 8px"}}
+                        onClick={async ()=>{
+                          const now = new Date().toISOString();
+                          const by  = authUser?.name||authUser?.id;
+                          updateClient({...cl, consentGiven:true, consentDate:now, consentBy:by});
+                          try {
+                            await apiFetch('/api/compliance/consent',{
+                              method:'POST',headers:{'Content-Type':'application/json'},
+                              body:JSON.stringify({userId:`client_${cl.id}`,scope:'client_consent',detail:`Client: ${cl.name}`}),
+                            });
+                          } catch(e) {}
+                        }}>
+                        ✅ Enregistrer
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{marginTop:14,fontSize:11,color:"var(--muted)"}}>
+            ℹ️ Le consentement peut également être enregistré directement depuis la fiche client (Page Clients → sélectionner un client).
+          </div>
+        </div>
+      )}
+
+      {activeView==="purge" && isAdmin && (
+        <div>
+          <div style={{marginBottom:12,fontSize:13,color:"var(--muted)"}}>Loi 18-07 Art. 17 — Politique de conservation. Supprimer les déchargements de plus de 10 ans (obligation réglementaire).</div>
+          <div className="alrt ae" style={{marginBottom:16}}><span>⚠</span><span>Cette opération est <strong>irréversible</strong>. Les données supprimées seront définitivement effacées de la base de données.</span></div>
+          <button className="btn" style={{background:"var(--err)",color:"#fff",width:"fit-content",border:"none"}} onClick={purgeOld}>
+            🗑 Purger les données ≥ 10 ans
+          </button>
+          {purgeMsg && <div style={{marginTop:12,fontSize:13,fontWeight:600,color:purgeMsg.startsWith("✅")?"var(--g)":"var(--err)"}}>{purgeMsg}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SETTINGS
+═══════════════════════════════════════════════════════════════════════════ */
+function PageSettings({sites,wasteTypes,updateSite,updateWT,authUser,updateUser,setAuthUser,docTypes,updateDocTypes,company,updateCompany,companyTrucks,addCompanyTruck,updateCompanyTruck,deleteCompanyTruck,clients,updateClient}) {
+  const t = useT();
+  const isAdmin = authUser.role==="admin";
+  const [tab, setTab] = useState("general");
+  const [editWT, setEditWT] = useState(null);
+  const [editSite, setEditSite] = useState(null);
+  const [pwForm, setPwForm] = useState({current:"",newPw:"",confirm:""});
+  const [pwMsg, setPwMsg] = useState(null);
+  const [profileForm, setProfileForm] = useState({name:authUser.name,email:authUser.email||"",phone:authUser.phone||"",matricule:authUser.matricule||""});
+  const [profileMsg, setProfileMsg] = useState(null);
+  const [profileConsent, setProfileConsent] = useState(false);
+  const [profileConsentExpanded, setProfileConsentExpanded] = useState(false);
+  const [newDoc, setNewDoc] = useState({private:"",state:"",prepaid:"",collect:""});
+  const [companyEdit, setCompanyEdit] = useState(company ? [...company] : [...COMPANY_FIELDS_DEFAULT]);
+  const [companyMsg, setCompanyMsg] = useState(null);
+  const [newCompanyField, setNewCompanyField] = useState({label:"",value:""});
+  const [truckForm, setTruckForm] = useState({plate:"",label:"",tare:"",status:"active"});
+  const [editTruck, setEditTruck] = useState(null);
+  const [truckMsg, setTruckMsg] = useState(null);
+
+  const settingsNav = [
+    {id:"general",   ic:"🏢", lbl:"Informations générales"},
+    {id:"profile",   ic:"👤", lbl:"Mon Profil"},
+    {id:"sites",     ic:"🏭", lbl:"Sites CET"},
+    {id:"tarifs",    ic:"💰", lbl:"Tarifs & Tarification"},
+    {id:"fleet",     ic:"🚛", lbl:"Flotte CETManager"},
+    {id:"documents", ic:"📋", lbl:"Types de documents"},
+    {id:"security",    ic:"🔐", lbl:"Sécurité du compte"},
+    {id:"compliance",  ic:"🛡️", lbl:isAdmin?"Conformité & Sécurité":"Mes données"},
+    {id:"about",       ic:"ℹ️", lbl:"À propos"},
+  ];
+
+  const handlePwChange = async () => {
+    if (pwForm.newPw.length < 8) { setPwMsg({t:"err",m:"Le nouveau mot de passe doit faire au moins 8 caractères."}); return; }
+    if (!/[A-Za-z]/.test(pwForm.newPw)||!/[0-9]/.test(pwForm.newPw)) { setPwMsg({t:"err",m:"Le mot de passe doit contenir au moins une lettre et un chiffre."}); return; }
+    if (pwForm.newPw !== pwForm.confirm) { setPwMsg({t:"err",m:"Les mots de passe ne correspondent pas."}); return; }
+    try {
+      const r = await apiFetch('/api/auth/change-password', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({userId:authUser.id, currentPassword:pwForm.current, newPassword:pwForm.newPw})
+      });
+      const data = await r.json();
+      if (!r.ok) { setPwMsg({t:"err",m:data.error||"Erreur serveur."}); return; }
+      setPwMsg({t:"ok",m:"Mot de passe mis à jour avec succès."});
+      setPwForm({current:"",newPw:"",confirm:""});
+    } catch(e) { setPwMsg({t:"err",m:"Erreur de connexion au serveur."}); }
+  };
+
+  const handleProfileSave = async () => {
+    if (!profileForm.name.trim()) { setProfileMsg({t:"err",m:"Le nom est requis."}); return; }
+    if (!profileForm.email.trim()) { setProfileMsg({t:"err",m:"L'email est requis."}); return; }
+    if (!profileConsent) { setProfileMsg({t:"err",m:"Vous devez cocher la case de consentement pour enregistrer vos données personnelles (Loi 18-07)."}); return; }
+    const updated = {...authUser, ...profileForm};
+    updateUser(updated);
+    setAuthUser(updated);
+    try {
+      await apiFetch('/api/compliance/consent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:authUser.id,scope:'profile_update'})});
+    } catch(e) {}
+    setProfileMsg({t:"ok",m:"Profil mis à jour avec succès. Consentement enregistré."});
+    setProfileConsent(false);
+  };
+
+  const removeDoc = (cat, idx) => {
+    const list = [...(docTypes[cat]||[])];
+    list.splice(idx, 1);
+    updateDocTypes({...docTypes, [cat]:list});
+  };
+
+  const addDoc = (cat) => {
+    const val = newDoc[cat].trim();
+    if (!val) return;
+    updateDocTypes({...docTypes, [cat]:[...(docTypes[cat]||[]), val]});
+    setNewDoc(f=>({...f,[cat]:""}));
+  };
+
+  return (
+    <div className="settings-grid">
+      <div className="settings-nav">
+        {settingsNav.map(n=>(
+          <button key={n.id} className={`sn-item${tab===n.id?" active":""}`} onClick={()=>setTab(n.id)}>
+            <span className="sn-ic">{n.ic}</span>{n.lbl}
+          </button>
+        ))}
+      </div>
+
+      <div className="settings-body">
+        {tab==="general"&&(
+          <>
+            <div className="settings-title">Informations de l'établissement</div>
+            <div className="settings-sub">Identité de l'organisme gestionnaire — apparaît sur les reçus et factures</div>
+            {companyMsg&&(
+              <div className={`alrt ${companyMsg.t==="ok"?"ao":"ae"}`} style={{marginBottom:14}}>
+                <span>{companyMsg.t==="ok"?"✅":"⚠"}</span><span>{companyMsg.m}</span>
+              </div>
+            )}
+            <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:16}}>
+              {companyEdit.map((f,i)=>(
+                <div key={f.id||i} style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <input className="fi" style={{flex:"0 0 200px",fontSize:11,fontFamily:"var(--mono)"}}
+                    placeholder="Nom du champ"
+                    value={f.label}
+                    onChange={e=>setCompanyEdit(ed=>ed.map((x,j)=>j===i?{...x,label:e.target.value}:x))}/>
+                  <input className="fi" style={{flex:1}}
+                    placeholder="Valeur"
+                    value={f.value}
+                    onChange={e=>setCompanyEdit(ed=>ed.map((x,j)=>j===i?{...x,value:e.target.value}:x))}/>
+                  <button className="btn bg" style={{color:"var(--err)",minWidth:60,fontSize:13}} onClick={()=>setCompanyEdit(ed=>ed.filter((_,j)=>j!==i))}>✕</button>
+                </div>
+              ))}
+            </div>
+            <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:16}}>
+              <input className="fi" style={{flex:"0 0 200px",fontSize:11,fontFamily:"var(--mono)"}}
+                placeholder="Nouveau champ..."
+                value={newCompanyField.label}
+                onChange={e=>setNewCompanyField(f=>({...f,label:e.target.value}))}/>
+              <input className="fi" style={{flex:1}}
+                placeholder="Valeur..."
+                value={newCompanyField.value}
+                onChange={e=>setNewCompanyField(f=>({...f,value:e.target.value}))}/>
+              <button className="btn bp" style={{minWidth:90,fontSize:13}} onClick={()=>{
+                if(!newCompanyField.label.trim()) return;
+                setCompanyEdit(ed=>[...ed,{id:"f_"+Date.now(),label:newCompanyField.label.trim(),value:newCompanyField.value.trim()}]);
+                setNewCompanyField({label:"",value:""});
+              }}>+ Ajouter</button>
+            </div>
+            <button className="btn bp" style={{width:"fit-content"}} onClick={()=>{
+              updateCompany(companyEdit);
+              setCompanyMsg({t:"ok",m:"Informations enregistrées avec succès."});
+              setTimeout(()=>setCompanyMsg(null),4000);
+            }}>✓ Enregistrer</button>
+            <div className="alrt ai" style={{marginTop:14}}>
+              <span>ℹ️</span>
+              <span style={{fontSize:11}}>Ces informations apparaissent sur les reçus de déchargement et les factures imprimées.</span>
+            </div>
+          </>
+        )}
+
+        {tab==="profile"&&(
+          <>
+            <div className="settings-title">Mon Profil</div>
+            <div className="settings-sub">Modifier vos informations personnelles</div>
+            {profileMsg&&(
+              <div className={`alrt ${profileMsg.t==="ok"?"ao":"ae"}`} style={{marginBottom:14}}>
+                <span>{profileMsg.t==="ok"?"✅":"⚠"}</span><span>{profileMsg.m}</span>
+              </div>
+            )}
+            <div className="fg" style={{gap:12,maxWidth:480}}>
+              <div className="field"><label>Nom complet</label>
+                <input className="fi" value={profileForm.name} onChange={e=>{setProfileForm(f=>({...f,name:e.target.value}));setProfileMsg(null);}} placeholder="Nom et prénom"/>
+              </div>
+              <div className="field"><label>Adresse e-mail</label>
+                <input className="fi" type="email" value={profileForm.email} onChange={e=>{setProfileForm(f=>({...f,email:e.target.value}));setProfileMsg(null);}} placeholder="email@demo-cet.dz"/>
+              </div>
+              <div className="fg fg2">
+                <div className="field"><label>Téléphone</label>
+                  <input className="fi" value={profileForm.phone} onChange={e=>{setProfileForm(f=>({...f,phone:e.target.value}));setProfileMsg(null);}} placeholder="034 XX XX XX"/>
+                </div>
+                <div className="field"><label>Matricule</label>
+                  <input className="fi" value={profileForm.matricule} onChange={e=>{setProfileForm(f=>({...f,matricule:e.target.value}));setProfileMsg(null);}} placeholder="ADM-001"/>
+                </div>
+              </div>
+              <div style={{border:"1px solid var(--bdr)",borderRadius:10,padding:"12px 14px",background:"var(--s2)"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:profileConsentExpanded?10:0}}>
+                  <span style={{fontSize:12,fontWeight:600}}>🔒 Consentement — Loi 18-07</span>
+                  <button type="button" onClick={()=>setProfileConsentExpanded(p=>!p)} style={{fontSize:11,color:"var(--info)",background:"none",border:"none",cursor:"pointer",padding:"2px 6px"}}>
+                    {profileConsentExpanded?"▲ Réduire":"▼ Lire la politique"}
+                  </button>
+                </div>
+                {profileConsentExpanded && (
+                  <div style={{fontSize:11,color:"var(--muted)",lineHeight:1.7,marginBottom:10,maxHeight:140,overflowY:"auto"}}>
+                    <strong>CETManager Démo</strong> traite vos données personnelles (nom, email, téléphone, matricule) pour la gestion des centres d'enfouissement technique, conformément à la <strong>Loi 18-07</strong> du 10 juin 2018. Durée de conservation : 10 ans. Droits : accès, rectification, effacement et opposition via Paramètres → Conformité & Données. Contact : admin@demo-cet.dz
+                  </div>
+                )}
+                <label style={{display:"flex",alignItems:"flex-start",gap:10,cursor:"pointer"}}>
+                  <input type="checkbox" checked={profileConsent} onChange={e=>{setProfileConsent(e.target.checked);setProfileMsg(null);}}
+                    style={{marginTop:2,width:16,height:16,accentColor:"var(--g)",flexShrink:0}}/>
+                  <span style={{fontSize:12,lineHeight:1.5}}>
+                    Je confirme avoir pris connaissance de la politique de confidentialité et je consens au traitement de mes données personnelles par CETManager Démo conformément à la Loi 18-07.
+                  </span>
+                </label>
+              </div>
+              <button className="btn bp" style={{width:"fit-content",opacity:profileConsent?1:.55}} onClick={handleProfileSave}>✓ Enregistrer le profil</button>
+            </div>
+          </>
+        )}
+
+        {tab==="sites"&&(
+          <>
+            <div className="settings-title">Sites de Traitement</div>
+            <div className="settings-sub">Gestion des 4 centres d'enfouissement technique</div>
+            <div style={{display:"flex",flexDirection:"column",gap:12}}>
+              {sites.map(s=>{
+                const pct=Math.round((s.used/s.capacity)*100);
+                const col=pct>80?"var(--err)":pct>60?"var(--warn)":"var(--g)";
+                const isEdit = editSite?.id===s.id;
+                return (
+                  <div key={s.id} className="card">
+                    <div className="fx aic jsb mb2">
+                      <div className="fx aic g2">
+                        <span className={`badge ${s.type==="CDI"?"b-warn":"b-info"}`}>{s.type}</span>
+                        <span style={{fontWeight:700,fontSize:14}}>{s.name}</span>
+                        <span className="tsm tmu">— {s.region}</span>
+                      </div>
+                      <button className="btn bg bsm" onClick={()=>setEditSite(isEdit?null:{...s})}>
+                        {isEdit?"Annuler":"✏️ Modifier"}
+                      </button>
+                    </div>
+                    {isEdit?(
+                      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                        <div className="fg fg2">
+                          <div className="field"><label>Nom / Titre</label>
+                            <input className="fi" value={editSite.name} onChange={e=>setEditSite(f=>({...f,name:e.target.value}))}/>
+                          </div>
+                          <div className="field"><label>Commune</label>
+                            <input className="fi" value={editSite.commune||""} onChange={e=>setEditSite(f=>({...f,commune:e.target.value}))} placeholder="ex: Démo"/>
+                          </div>
+                        </div>
+                        <div className="field"><label>Localisation (GPS ou adresse)</label>
+                          <input className="fi" value={editSite.localisation||""} onChange={e=>setEditSite(f=>({...f,localisation:e.target.value}))} placeholder="ex: 36.8167° N, 5.7667° E ou Route nationale N°43"/>
+                        </div>
+                        <div className="fg fg2">
+                          <div className="field"><label>Capacité totale (t)</label>
+                            <input className="fi" type="number" value={editSite.capacity} onChange={e=>setEditSite(f=>({...f,capacity:parseInt(e.target.value)||0}))}/>
+                          </div>
+                          <div className="field"><label>Volume utilisé (t)</label>
+                            <input className="fi" type="number" value={editSite.used} onChange={e=>setEditSite(f=>({...f,used:parseInt(e.target.value)||0}))}/>
+                          </div>
+                        </div>
+                        <div className="field"><label>Types de déchets acceptés</label>
+                          <div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:4}}>
+                            {wasteTypes.map(w=>{
+                              const checked = (editSite.acceptedWaste||[]).includes(w.id);
+                              return (
+                                <label key={w.id} style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer",
+                                  padding:"4px 10px",borderRadius:6,fontSize:11,fontWeight:600,
+                                  background:checked?"rgba(23,138,52,.12)":"var(--s2)",
+                                  border:`1px solid ${checked?"var(--g)":"var(--bdr)"}`,
+                                  color:checked?"var(--g)":"var(--muted)"}}>
+                                  <input type="checkbox" checked={checked} style={{accentColor:"var(--g)"}}
+                                    onChange={e=>{
+                                      const list = editSite.acceptedWaste||[];
+                                      setEditSite(f=>({...f, acceptedWaste: e.target.checked ? [...list,w.id] : list.filter(x=>x!==w.id)}));
+                                    }}/>
+                                  {w.label}
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </div>
+                        <div className="fx g2" style={{justifyContent:"flex-end"}}>
+                          <button className="btn bg bsm" onClick={()=>setEditSite(null)}>Annuler</button>
+                          <button className="btn bp bsm" onClick={()=>{updateSite(editSite);setEditSite(null);}}>✓ Enregistrer</button>
+                        </div>
+                      </div>
+                    ):(
+                      <>
+                        <div className="fg fg3 mb2" style={{gap:8}}>
+                          {[["📍 Commune",s.commune||"—"],["🗺 Localisation",s.localisation||"—"],["👤 Responsable",s.manager||"—"]].map(([l,v])=>(
+                            <div key={l} style={{fontSize:11}}><span className="tmu">{l} : </span><span style={{fontWeight:600}}>{v}</span></div>
+                          ))}
+                        </div>
+                        <div style={{marginBottom:6}}>
+                          <div style={{fontSize:10,color:"var(--muted)",marginBottom:4}}>Déchets acceptés :</div>
+                          <div className="fx" style={{gap:4,flexWrap:"wrap"}}>
+                            {(s.acceptedWaste&&s.acceptedWaste.length>0 ? s.acceptedWaste : []).map(wId=>{
+                              const wt = wasteTypes.find(w=>w.id===wId);
+                              return wt?<span key={wId} className="badge b-ok" style={{fontSize:9}}>{wt.label}</span>:null;
+                            })}
+                            {(!s.acceptedWaste||s.acceptedWaste.length===0)&&<span className="tsm tmu" style={{fontSize:10}}>Non définis</span>}
+                          </div>
+                        </div>
+                        <div className="cbt mb1"><div className="cbf" style={{width:`${pct}%`,background:col}}/></div>
+                        <div className="fx jsb">
+                          <span className="tsm tmu">Remplissage : {pct}%</span>
+                          <span className="mn tsm tmu">{(s.used/1000).toFixed(0)}k / {(s.capacity/1000).toFixed(0)}k t</span>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+
+        {tab==="tarifs"&&(
+          <>
+            <div className="settings-title">Grille Tarifaire</div>
+            <div className="settings-sub">4 tarifs par type de déchet — Traitement (tonnage / rotation) et Collecte et Traitement (tonnage / rotation)</div>
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              {wasteTypes.map(w=>{
+                const isEdit = editWT?.id===w.id;
+                return (
+                  <div key={w.id} className="card">
+                    <div style={{fontWeight:700,fontSize:13,marginBottom:isEdit?10:6}}>{w.label}
+                      <span className="tsm tmu" style={{fontWeight:400,marginLeft:8}}>Sites : {w.siteTypes.join(", ")}</span>
+                    </div>
+                    {isEdit?(
+                      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                        <div style={{fontSize:11,fontFamily:"var(--mono)",color:"var(--muted)",textTransform:"uppercase",letterSpacing:".08em"}}>🏭 Traitement</div>
+                        <div className="fx aic g2" style={{flexWrap:"wrap"}}>
+                          <div className="fx aic g1">
+                            <input className="fi" type="number" style={{width:120}} value={editWT.price}
+                              onChange={e=>setEditWT(f=>({...f,price:parseInt(e.target.value)||0}))}
+                              placeholder="Tonnage"/>
+                            <span className="tsm tmu">DA/t</span>
+                          </div>
+                          <div className="fx aic g1">
+                            <input className="fi" type="number" style={{width:120}} value={editWT.rotationPrice||0}
+                              onChange={e=>setEditWT(f=>({...f,rotationPrice:parseInt(e.target.value)||0}))}
+                              placeholder="Rotation"/>
+                            <span className="tsm tmu">DA/rot.</span>
+                          </div>
+                        </div>
+                        <div style={{fontSize:11,fontFamily:"var(--mono)",color:"var(--purple)",textTransform:"uppercase",letterSpacing:".08em"}}>🚛 Collecte et Traitement</div>
+                        <div className="fx aic g2" style={{flexWrap:"wrap"}}>
+                          <div className="fx aic g1">
+                            <input className="fi" type="number" style={{width:120}} value={editWT.collectPrice||0}
+                              onChange={e=>setEditWT(f=>({...f,collectPrice:parseInt(e.target.value)||0}))}
+                              placeholder="Tonnage collecte"/>
+                            <span className="tsm tmu">DA/t</span>
+                          </div>
+                          <div className="fx aic g1">
+                            <input className="fi" type="number" style={{width:120}} value={editWT.collectRotationPrice||0}
+                              onChange={e=>setEditWT(f=>({...f,collectRotationPrice:parseInt(e.target.value)||0}))}
+                              placeholder="Rotation collecte"/>
+                            <span className="tsm tmu">DA/rot.</span>
+                          </div>
+                        </div>
+                        <div className="fx g2">
+                          <button className="btn bp bsm" onClick={()=>{updateWT(editWT);setEditWT(null);}}>✓ Sauvegarder</button>
+                          <button className="btn bg bsm" onClick={()=>setEditWT(null)}>Annuler</button>
+                        </div>
+                      </div>
+                    ):(
+                      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",justifyContent:"space-between"}}>
+                        <div className="fg fg2" style={{flex:1,gap:8}}>
+                          <div className="card-sm" style={{borderTop:"2px solid var(--g)"}}>
+                            <div style={{fontSize:9,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".08em",marginBottom:4}}>🏭 Traitement / Tonnage</div>
+                            <span style={{fontFamily:"var(--head)",fontSize:15,fontWeight:800,color:"var(--g)"}}>{fmt(w.price)}</span>
+                            <span style={{fontSize:10,color:"var(--muted)"}}> /t</span>
+                          </div>
+                          <div className="card-sm" style={{borderTop:"2px solid var(--orange)"}}>
+                            <div style={{fontSize:9,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".08em",marginBottom:4}}>🏭 Traitement / Rotation</div>
+                            <span style={{fontFamily:"var(--head)",fontSize:15,fontWeight:800,color:"var(--orange)"}}>{fmt(w.rotationPrice||0)}</span>
+                            <span style={{fontSize:10,color:"var(--muted)"}}> /rot.</span>
+                          </div>
+                          <div className="card-sm" style={{borderTop:"2px solid var(--purple)"}}>
+                            <div style={{fontSize:9,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".08em",marginBottom:4}}>🚛 Collecte / Tonnage</div>
+                            <span style={{fontFamily:"var(--head)",fontSize:15,fontWeight:800,color:"var(--purple)"}}>{fmt(w.collectPrice||0)}</span>
+                            <span style={{fontSize:10,color:"var(--muted)"}}> /t</span>
+                          </div>
+                          <div className="card-sm" style={{borderTop:"2px solid var(--info)"}}>
+                            <div style={{fontSize:9,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".08em",marginBottom:4}}>🚛 Collecte / Rotation</div>
+                            <span style={{fontFamily:"var(--head)",fontSize:15,fontWeight:800,color:"var(--info)"}}>{fmt(w.collectRotationPrice||0)}</span>
+                            <span style={{fontSize:10,color:"var(--muted)"}}> /rot.</span>
+                          </div>
+                        </div>
+                        <button className="btn bg bsm" onClick={()=>setEditWT({...w})}>✏️ Modifier</button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="alrt ai mt4" style={{marginTop:16,marginBottom:0}}>
+              <span>ℹ️</span>
+              <span style={{fontSize:11}}>Les modifications tarifaires s'appliquent aux nouveaux déchargements uniquement. Les relevés existants conservent les prix en vigueur lors de la saisie.</span>
+            </div>
+          </>
+        )}
+
+        {tab==="fleet"&&(
+          <>
+            <div className="settings-title">Flotte CETManager</div>
+            <div className="settings-sub">Gérer les camions de collecte de l'entreprise</div>
+            {truckMsg&&(
+              <div className={`alrt ${truckMsg.t==="ok"?"ao":"ae"}`} style={{marginBottom:14}}>
+                <span>{truckMsg.t==="ok"?"✅":"⚠"}</span><span>{truckMsg.m}</span>
+              </div>
+            )}
+            {/* Truck list */}
+            <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:20}}>
+              {(companyTrucks||[]).length===0&&(
+                <div style={{fontSize:12,color:"var(--muted)",padding:"8px 0"}}>Aucun camion enregistré.</div>
+              )}
+              {(companyTrucks||[]).map(t=>{
+                const isEdit = editTruck?.id===t.id;
+                return (
+                  <div key={t.id} className="card" style={{padding:"12px 16px"}}>
+                    {isEdit?(
+                      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                        <div className="fg fg3">
+                          <div className="field"><label>Immatriculation *</label>
+                            <input className="fi" value={editTruck.plate} onChange={e=>setEditTruck(f=>({...f,plate:e.target.value.toUpperCase()}))} placeholder="ex: 18-TRK-001"/>
+                          </div>
+                          <div className="field"><label>Désignation</label>
+                            <input className="fi" value={editTruck.label||""} onChange={e=>setEditTruck(f=>({...f,label:e.target.value}))} placeholder="ex: Benne n°3"/>
+                          </div>
+                          <div className="field"><label>Tare (t)</label>
+                            <input className="fi" type="number" step="0.1" min="0" value={editTruck.tare||""} onChange={e=>setEditTruck(f=>({...f,tare:parseFloat(e.target.value)||0}))} placeholder="0.0"/>
+                          </div>
+                        </div>
+                        <div className="field"><label>Statut</label>
+                          <div className="seg" style={{marginTop:4}}>
+                            <button className={`seg-btn${editTruck.status==="active"?" active":""}`} onClick={()=>setEditTruck(f=>({...f,status:"active"}))}>✅ Actif</button>
+                            <button className={`seg-btn${editTruck.status!=="active"?" active":""}`} onClick={()=>setEditTruck(f=>({...f,status:"inactive"}))}>⏸ Inactif</button>
+                          </div>
+                        </div>
+                        <div className="fx g2">
+                          <button className="btn bp bsm" onClick={()=>{updateCompanyTruck(editTruck);setEditTruck(null);setTruckMsg({t:"ok",m:"Camion mis à jour."});setTimeout(()=>setTruckMsg(null),3000);}}>✓ Sauvegarder</button>
+                          <button className="btn bg bsm" onClick={()=>setEditTruck(null)}>Annuler</button>
+                        </div>
+                      </div>
+                    ):(
+                      <div className="fx aic jsb">
+                        <div className="fx aic g3">
+                          <span className={`badge ${t.status==="active"?"b-ok":"b-dim"}`}>{t.status==="active"?"✅ Actif":"⏸ Inactif"}</span>
+                          <span style={{fontWeight:700,fontFamily:"var(--mono)",fontSize:14}}>{t.plate}</span>
+                          {t.label&&<span style={{fontSize:12,color:"var(--muted)"}}>{t.label}</span>}
+                          {t.tare>0&&<span className="badge" style={{fontSize:10}}>Tare: {t.tare} t</span>}
+                        </div>
+                        <div className="fx g2">
+                          <button className="btn bg bsm" onClick={()=>setEditTruck({...t})}>✏️ Modifier</button>
+                          <button className="btn be bsm" onClick={()=>{deleteCompanyTruck(t.id);setTruckMsg({t:"ok",m:"Camion supprimé."});setTimeout(()=>setTruckMsg(null),3000);}}>🗑</button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            {/* Add new truck */}
+            <div className="card" style={{padding:"16px"}}>
+              <div style={{fontWeight:700,fontSize:13,marginBottom:12}}>+ Nouveau camion</div>
+              <div className="fg fg3" style={{marginBottom:10}}>
+                <div className="field"><label>Immatriculation *</label>
+                  <input className="fi" value={truckForm.plate} onChange={e=>setTruckForm(f=>({...f,plate:e.target.value.toUpperCase()}))} placeholder="ex: 18-TRK-001"/>
+                </div>
+                <div className="field"><label>Désignation</label>
+                  <input className="fi" value={truckForm.label||""} onChange={e=>setTruckForm(f=>({...f,label:e.target.value}))} placeholder="ex: Benne n°3"/>
+                </div>
+                <div className="field"><label>Tare (t)</label>
+                  <input className="fi" type="number" step="0.1" min="0" value={truckForm.tare||""} onChange={e=>setTruckForm(f=>({...f,tare:e.target.value}))} placeholder="0.0"/>
+                </div>
+              </div>
+              <button className="btn bp" style={{width:"fit-content"}} disabled={!truckForm.plate.trim()} onClick={()=>{
+                const newT = {id:"ct_"+Date.now(),plate:truckForm.plate.trim().toUpperCase(),label:truckForm.label.trim(),tare:parseFloat(truckForm.tare)||0,status:"active"};
+                addCompanyTruck(newT);
+                setTruckForm({plate:"",label:"",tare:"",status:"active"});
+                setTruckMsg({t:"ok",m:"Camion ajouté avec succès."});
+                setTimeout(()=>setTruckMsg(null),3000);
+              }}>+ Ajouter le camion</button>
+            </div>
+          </>
+        )}
+
+        {tab==="documents"&&(
+          <>
+            <div className="settings-title">Types de documents</div>
+            <div className="settings-sub">Gérer les pièces justificatives requises par catégorie de client</div>
+            {[
+              {key:"private", label:"🏭 Clients Privés / Entreprises (Convention)"},
+              {key:"state",   label:"🏛 Collectivités / Organismes d'État (Convention)"},
+              {key:"prepaid", label:"🎫 Clients Bonus Prépayé"},
+              {key:"collect", label:"🚛 Service Collecte et Traitement (documents supplémentaires)"},
+            ].map(cat=>(
+              <div key={cat.key} style={{marginBottom:28}}>
+                <div style={{fontWeight:700,fontSize:13,marginBottom:10,color:"var(--g)"}}>{cat.label}</div>
+                <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:10}}>
+                  {(docTypes[cat.key]||[]).map((doc,i)=>(
+                    <div key={i} className="fx aic jsb" style={{padding:"9px 13px",background:"var(--s2)",borderRadius:8,border:"1px solid var(--bdr)"}}>
+                      <span style={{fontSize:12}}>📄 {doc}</span>
+                      <button className="btn bg bsm" style={{color:"var(--err)",fontSize:10,minWidth:70}} onClick={()=>removeDoc(cat.key,i)}>✕ Retirer</button>
+                    </div>
+                  ))}
+                  {(docTypes[cat.key]||[]).length===0&&(
+                    <div style={{fontSize:11,color:"var(--muted)",padding:"6px 0"}}>Aucun document requis défini.</div>
+                  )}
+                </div>
+                <div className="fx g2">
+                  <input className="fi" style={{flex:1}} placeholder="Nom du document à ajouter..."
+                    value={newDoc[cat.key]}
+                    onChange={e=>setNewDoc(f=>({...f,[cat.key]:e.target.value}))}
+                    onKeyDown={e=>e.key==="Enter"&&addDoc(cat.key)}/>
+                  <button className="btn bp bsm" onClick={()=>addDoc(cat.key)}>+ Ajouter</button>
+                </div>
+              </div>
+            ))}
+            <div className="alrt ai" style={{marginTop:4}}>
+              <span>ℹ️</span>
+              <span style={{fontSize:11}}>Ces listes apparaissent dans les dossiers clients et les formulaires de création. Les modifications sont enregistrées immédiatement dans le navigateur.</span>
+            </div>
+          </>
+        )}
+
+        {tab==="security"&&(
+          <>
+            <div className="settings-title">Sécurité du compte</div>
+            <div className="settings-sub">Modifier votre mot de passe de connexion</div>
+            <div style={{background:"var(--s2)",border:"1px solid var(--bdr)",borderRadius:8,padding:"14px 16px",marginBottom:20}}>
+              <div className="fx aic g2 mb1">
+                <span>👤</span>
+                <span style={{fontWeight:700}}>{authUser.name}</span>
+              </div>
+              <div className="mn tsm tmu">{authUser.email}</div>
+              <div className="tsm tmu">{authUser.role==="admin"?"👔 Administrateur":"🦺 Opérateur"} · {authUser.matricule}</div>
+            </div>
+            {pwMsg&&(
+              <div className={`alrt ${pwMsg.t==="ok"?"ao":"ae"} mb3`} style={{marginBottom:14}}>
+                <span>{pwMsg.t==="ok"?"✅":"⚠"}</span><span>{pwMsg.m}</span>
+              </div>
+            )}
+            <div className="fg" style={{gap:12,maxWidth:400}}>
+              <div className="field"><label>Mot de passe actuel</label>
+                <input className="fi" type="password" value={pwForm.current} onChange={e=>setPwForm(f=>({...f,current:e.target.value}))} placeholder="••••••••"/>
+              </div>
+              <div className="field"><label>Nouveau mot de passe</label>
+                <input className="fi" type="password" value={pwForm.newPw} onChange={e=>setPwForm(f=>({...f,newPw:e.target.value}))} placeholder="Min. 6 caractères"/>
+              </div>
+              <div className="field"><label>Confirmer le nouveau mot de passe</label>
+                <input className="fi" type="password" value={pwForm.confirm} onChange={e=>setPwForm(f=>({...f,confirm:e.target.value}))} placeholder="••••••••"/>
+              </div>
+              <button className="btn bp" style={{width:"fit-content"}} onClick={handlePwChange}>🔐 Changer le mot de passe</button>
+            </div>
+          </>
+        )}
+
+        {tab==="compliance"&&(
+          <CompliancePanel authUser={authUser} isAdmin={isAdmin} clients={clients||[]} updateClient={updateClient}/>
+        )}
+
+        {tab==="about"&&(
+          <>
+            <div className="settings-title">À propos du système</div>
+            <div className="settings-sub">Plateforme de gestion des centres d'enfouissement technique</div>
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              {[
+                ["Version","1.0.0 — Build 2025.07"],
+                ["Technologie","React 18 + Vite 5"],
+                ["Hébergement","Replit Cloud"],
+                ["Base de données","PostgreSQL (connecté)"],
+                ["Mode actuel","Données persistées en base"],
+                ["Développé pour",cof(company,'name')],
+              ].map(([l,v])=>(
+                <div key={l} className="fx jsb" style={{padding:"10px 14px",background:"var(--s2)",borderRadius:8,border:"1px solid var(--bdr)"}}>
+                  <span className="tsm tmu" style={{fontFamily:"var(--mono)",fontSize:10,textTransform:"uppercase",letterSpacing:".1em",alignSelf:"center"}}>{l}</span>
+                  <span style={{fontWeight:600,fontSize:13}}>{v}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{marginTop:20,padding:"14px 16px",background:"rgba(46,201,92,.06)",border:"1px solid rgba(46,201,92,.15)",borderRadius:8}}>
+              <div style={{fontWeight:700,marginBottom:8,fontSize:13}}>🗺 Feuille de route</div>
+              {[
+                ["✅","Connexion base de données PostgreSQL"],
+                ["🔜","Export PDF des relevés et reçus"],
+                ["🔜","Notifications SMS/WhatsApp en temps réel"],
+                ["🔜","API pont-bascule (lecture poids automatique)"],
+                ["🔜","Module photo evidence (caméra)"],
+                ["🔜","Mode hors-ligne avec synchronisation"],
+                ["🔜","Tableau de bord analytique avancé"],
+              ].map(([ic,t])=>(
+                <div key={t} className="fx aic g2" style={{marginBottom:6,fontSize:12,color:"var(--muted)"}}>
+                  <span>{ic}</span>{t}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DB SCHEMA
+═══════════════════════════════════════════════════════════════════════════ */
+function PageSchema() {
+  const tables=[
+    {name:"USERS",icon:"👤",color:"var(--purple)",fields:[
+      ["user_id","VARCHAR(10)","PK"],["name","VARCHAR(100)",""],
+      ["email","VARCHAR(100)","UNIQUE"],["password_hash","VARCHAR(255)",""],
+      ["role","ENUM(admin,operator)",""],["status","ENUM(active,inactive,pending)",""],
+      ["site_id","VARCHAR(10)","FK→Sites"],["matricule","VARCHAR(20)",""],
+      ["phone","VARCHAR(20)",""],["created_at","TIMESTAMP","AUTO"],
+    ]},
+    {name:"CLIENTS",icon:"🏢",color:"var(--g)",fields:[
+      ["client_id","VARCHAR(10)","PK"],["name","VARCHAR(100)",""],
+      ["client_type","ENUM(state,private,cash)",""],["type","ENUM(daily,convention)",""],
+      ["status","ENUM(pending_docs,under_review,approved,rejected)",""],
+      ["phone","VARCHAR(20)",""],["address","VARCHAR(150)",""],
+      ["nif","VARCHAR(20)",""],["rc","VARCHAR(30)",""],
+      ["credit_limit","DECIMAL(12,2)",""],["consumed_amount","DECIMAL(12,2)",""],
+      ["created_at","TIMESTAMP","AUTO"],
+    ]},
+    {name:"SITES",icon:"🏭",color:"var(--warn)",fields:[
+      ["site_id","VARCHAR(10)","PK"],["name","VARCHAR(100)",""],
+      ["region","VARCHAR(50)",""],["type","ENUM(CET,CDI)",""],
+      ["capacity_tons","DECIMAL(10,0)",""],["used_tons","DECIMAL(10,2)",""],
+    ]},
+    {name:"TRUCKS",icon:"🚛",color:"var(--info)",fields:[
+      ["plate_number","VARCHAR(20)","PK"],["client_id","VARCHAR(10)","FK→Clients"],
+      ["tare_weight","DECIMAL(6,2)",""],["allowed_waste","JSON",""],["is_active","BOOLEAN",""],
+    ]},
+    {name:"DISCHARGES",icon:"⚖️",color:"var(--err)",fields:[
+      ["discharge_id","VARCHAR(20)","PK"],["truck_plate","VARCHAR(20)","FK→Trucks"],
+      ["site_id","VARCHAR(10)","FK→Sites"],["client_id","VARCHAR(10)","FK→Clients"],
+      ["operator_id","VARCHAR(10)","FK→Users"],
+      ["gross_weight","DECIMAL(8,2)",""],["tare_weight","DECIMAL(8,2)",""],
+      ["net_weight","DECIMAL(8,2)","CALC"],["waste_type","ENUM(MEN,IND,MED,INE)",""],
+      ["unit_price","DECIMAL(10,2)",""],["total_cost","DECIMAL(12,2)","CALC"],
+      ["payment_status","ENUM(pending,paid,settled,flagged)",""],
+      ["pay_method","ENUM(cash,convention,tpe,epay)",""],
+      ["timestamp","TIMESTAMP","AUTO"],
+    ]},
+    {name:"DOCUMENTS",icon:"📄",color:"var(--g2)",fields:[
+      ["doc_id","VARCHAR(20)","PK"],["client_id","VARCHAR(10)","FK→Clients"],
+      ["doc_type","VARCHAR(100)",""],["file_url","VARCHAR(255)",""],
+      ["status","ENUM(pending,verified,rejected)",""],
+      ["uploaded_at","TIMESTAMP","AUTO"],["verified_by","VARCHAR(10)","FK→Users"],
+    ]},
+  ];
+
+  return (
+    <>
+      <div className="mb4">
+        <div style={{fontFamily:"var(--head)",fontSize:22,fontWeight:800,letterSpacing:".04em"}}>Architecture Base de Données</div>
+        <div className="tsm tmu mt1">Schéma relationnel — 6 tables · PostgreSQL / MySQL</div>
+      </div>
+
+      <div className="alrt ao mb4">
+        <span>🔗</span>
+        <span><strong>Relations : </strong>
+          TRUCKS.client_id → CLIENTS &nbsp;|&nbsp;
+          DISCHARGES.truck_plate → TRUCKS &nbsp;|&nbsp;
+          DISCHARGES.site_id → SITES &nbsp;|&nbsp;
+          DISCHARGES.client_id → CLIENTS &nbsp;|&nbsp;
+          DISCHARGES.operator_id → USERS &nbsp;|&nbsp;
+          DOCUMENTS.client_id → CLIENTS
+        </span>
+      </div>
+
+      <div className="sg mb4">
+        {tables.map(t=>(
+          <div key={t.name} className="st">
+            <div className="sth" style={{background:t.color}}><span>{t.icon}</span>{t.name}</div>
+            {t.fields.map(([f,type,tag])=>(
+              <div key={f} className="sr">
+                <div className="sf">
+                  {tag==="PK"&&<span style={{color:"var(--warn)",fontSize:9,marginRight:4}}>🔑</span>}
+                  {tag.startsWith("FK")&&<span style={{color:"var(--info)",fontSize:9,marginRight:4}}>🔗</span>}
+                  {tag==="UNIQUE"&&<span style={{color:"var(--purple)",fontSize:9,marginRight:4}}>◇</span>}
+                  {f}
+                </div>
+                <div className="fx aic g2">
+                  <span className="styp">{type}</span>
+                  {tag==="CALC"&&<span className="badge b-warn" style={{fontSize:9}}>CALC</span>}
+                  {tag==="AUTO"&&<span className="badge b-ok"   style={{fontSize:9}}>AUTO</span>}
+                  {tag==="UNIQUE"&&<span className="badge b-purple" style={{fontSize:9}}>UNIQ</span>}
+                  {tag.startsWith("FK")&&<span className="badge b-info" style={{fontSize:9}}>{tag.slice(3)}</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+
+      <div className="panel mb4">
+        <div className="ph"><span className="pt">⚡ Flux Logique</span></div>
+        <div style={{padding:20,display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:20}}>
+          {[
+            {title:"💵 Client Cash",color:"var(--warn)",steps:["Opérateur saisit la plaque","Sélection client cash (existant ou nouveau)","Net = Brut − Tare","Total = Net × Tarif","🚧 Barrière FERMÉE","Confirmation réception espèces","payment_status ← PAID","🟢 Barrière OUVERTE","Reçu SMS généré"]},
+            {title:"📋 Convention",color:"var(--info)",steps:["Opérateur saisit la plaque","Auto-chargement tare + contrat","Net = Brut − Tare","Total = Net × Tarif contractuel","Vérif. limite de crédit","Dépassement → FLAGGED + alerte","OK → status SETTLED","🟢 Barrière OUVERTE immédiatement","Débit relevé mensuel"]},
+            {title:"📄 Approbation Client",color:"var(--purple)",steps:["Institution dépose dossier","Admin crée fiche (pending_docs)","Institution fournit documents","Dossier passe → under_review","Admin vérifie pièces requises","Rejeté → rejected + motif","Approuvé + limite de crédit fixée","Accès convention activé","Relevés mensuels générables"]},
+          ].map(flow=>(
+            <div key={flow.title}>
+              <div style={{fontFamily:"var(--head)",fontSize:14,fontWeight:800,color:flow.color,marginBottom:12}}>{flow.title}</div>
+              {flow.steps.map((s,i)=>(
+                <div key={i} className="fx aic g2" style={{marginBottom:7}}>
+                  <span className="mn" style={{color:"var(--dim)",fontSize:10,minWidth:18}}>{String(i+1).padStart(2,"0")}</span>
+                  <span style={{fontSize:11,color:s.includes("🚧")?"var(--err)":s.includes("🟢")?"var(--g)":"var(--txt)"}}>{s}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:14}}>
+        {[
+          {ic:"📷",title:"Photo Evidence",       desc:"Photo du chargement avant validation. Prévient les litiges sur le poids déclaré.",    st:"À implémenter",  sc:"b-warn"},
+          {ic:"📡",title:"Mode Hors-ligne",       desc:"IndexedDB local + synchronisation automatique au retour de connexion.",                st:"En développement",sc:"b-info"},
+          {ic:"⚡",title:"API Pont-Bascule",      desc:"Connexion directe à la pèse-personne. Lecture automatique du poids — zéro erreur.",   st:"Optionnel",      sc:"b-purple"},
+        ].map(f=>(
+          <div key={f.title} className="card" style={{borderTop:"2px solid var(--g)"}}>
+            <div style={{fontSize:28,marginBottom:8}}>{f.ic}</div>
+            <div style={{fontFamily:"var(--head)",fontSize:15,fontWeight:800,marginBottom:6}}>{f.title}</div>
+            <div style={{fontSize:12,color:"var(--muted)",lineHeight:1.6,marginBottom:10}}>{f.desc}</div>
+            <span className={`badge ${f.sc}`}>{f.st}</span>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
