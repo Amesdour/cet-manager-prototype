@@ -728,7 +728,7 @@ app.put('/api/invoices/:id', requireAdmin, async (req, res) => {
         `UPDATE discharges SET status='paid'
          WHERE client_id=$1
            AND status NOT IN ('paid','cancelled')
-           AND LEFT(ts::text, $2) = $3`,
+           AND LEFT((ts + INTERVAL '1 hour')::text, $2) = $3`,
         [inv.clientId, pfxLen, inv.month]
       );
     }
@@ -742,7 +742,162 @@ app.put('/api/invoices/:id', requireAdmin, async (req, res) => {
   }
 });
 
-/* ─── AUTH ────────────────────────────────────────────────────────────────── */
+/* ─── BACKFILL: sync invoices.paid_amount from the real payment ledger ──────
+   The pre-fix version of POST /api/bills/:billId/payments computed the sync
+   period using UTC instead of Algeria local time (fixed in a prior commit).
+   Any payment made before that fix may have updated discharge_payments and
+   the bill correctly, but silently failed to update the matching invoices
+   row — exactly what happened to APC EL MILIA's Feb 2026 invoice: the
+   payment is real and visible in the Relevé Client ledger, but the invoice
+   still shows paid_amount=0.
+   This recomputes paid_amount for EVERY invoice directly from
+   discharge_payments (the actual source of truth), for both monthly and
+   annual invoices. It only ever raises paid_amount (GREATEST), never lowers
+   it, and never regresses a 'paid' status — same guarantees as everywhere
+   else invoices are touched. Safe and cheap to run on every startup. */
+async function backfillInvoicePayments() {
+  const dbClient = await pool.connect();
+  try {
+    const ALGERIA_OFFSET = `INTERVAL '1 hour'`;
+    for (const periodLen of [7, 4]) { // 7 = "YYYY-MM" monthly invoices, 4 = "YYYY" annual invoices
+      const { rowCount } = await dbClient.query(`
+        UPDATE invoices inv
+        SET paid_amount = GREATEST(inv.paid_amount, sub.total_paid),
+            status = CASE
+              WHEN inv.status = 'paid' THEN 'paid'
+              WHEN GREATEST(inv.paid_amount, sub.total_paid) >= inv.total_amount - 0.005 THEN 'paid'
+              WHEN GREATEST(inv.paid_amount, sub.total_paid) > 0 THEN 'partial'
+              ELSE inv.status
+            END
+        FROM (
+          SELECT d.client_id AS client_id,
+                 LEFT((d.ts + ${ALGERIA_OFFSET})::text, $1) AS period,
+                 SUM(dp.applied_amount_ttc) AS total_paid
+          FROM discharge_payments dp
+          JOIN discharges d ON d.id = dp.discharge_id
+          GROUP BY d.client_id, LEFT((d.ts + ${ALGERIA_OFFSET})::text, $1)
+        ) sub
+        WHERE inv.client_id = sub.client_id
+          AND inv.month = sub.period
+          AND LENGTH(inv.month) = $1
+          AND sub.total_paid > inv.paid_amount + 0.005
+      `, [periodLen]);
+      if (rowCount > 0) console.log(`[backfillInvoicePayments] corrected ${rowCount} invoice(s) with period length ${periodLen}`);
+    }
+  } catch (e) {
+    console.error('[backfillInvoicePayments] error:', e.message);
+  } finally {
+    dbClient.release();
+  }
+}
+
+/* ─── MONTHLY AUTO-CLOSE (Phase 6.1) ─────────────────────────────────────────
+   At the start of each month, automatically generate/refresh the invoices row
+   for every convention/rotation/prepaid client for each of their past
+   completed months (monthly billing clients only — annual clients keep
+   accumulating and are still generated on demand from the Relevé Client tab).
+   Idempotent: safe to run repeatedly (on every server start, and periodically
+   as a safety net for Render free-tier sleep/restart), and never regresses an
+   invoice's status or paid_amount — same guarantees as PUT /api/invoices/:id.
+   A manual "🔄 Régénérer" action from the Archives tab (or the endpoint below)
+   recomputes a single invoice's total_amount from the current discharges at
+   any time, e.g. after a late correction. */
+async function closeCompletedMonths() {
+  const dbClient = await pool.connect();
+  try {
+    // Discharges are matched to invoice periods the same way the frontend does
+    // (Africa/Algiers local calendar month, UTC+1, no DST) — see tsMatchesPfx
+    // in landfill-tracker.jsx and the payment-sync fix above.
+    const ALGERIA_OFFSET_MS = 60 * 60 * 1000;
+    const nowAlgeria = new Date(Date.now() + ALGERIA_OFFSET_MS);
+    const currentPeriod = `${nowAlgeria.getUTCFullYear()}-${String(nowAlgeria.getUTCMonth() + 1).padStart(2, '0')}`;
+
+    const { rows: clients } = await dbClient.query(
+      `SELECT * FROM clients
+       WHERE status = 'approved'
+         AND type IN ('convention', 'rotation', 'prepaid')
+         AND COALESCE(pay_frequency, 'monthly') != 'annual'`
+    );
+
+    if (clients.length === 0) {
+      // Diagnostic breakdown so a "0 clients" run is debuggable from the log
+      // alone, without needing direct DB access.
+      const { rows: diag } = await dbClient.query(
+        `SELECT status, type, pay_frequency, COUNT(*) FROM clients GROUP BY status, type, pay_frequency ORDER BY 1,2,3`
+      );
+      console.log('[closeCompletedMonths] 0 clients matched the filter. Actual client status/type/pay_frequency combinations in DB:',
+        JSON.stringify(diag));
+    }
+
+    let closedCount = 0;
+    for (const cl of clients) {
+      const { rows: periodRows } = await dbClient.query(
+        `SELECT DISTINCT LEFT((ts + INTERVAL '1 hour')::text, 7) AS period
+         FROM discharges
+         WHERE client_id = $1 AND status != 'cancelled'`,
+        [cl.id]
+      );
+
+      for (const { period } of periodRows) {
+        if (!period || period >= currentPeriod) continue; // current/open month — leave alone
+
+        const { rows: discs } = await dbClient.query(
+          `SELECT total FROM discharges
+           WHERE client_id = $1 AND status != 'cancelled'
+             AND LEFT((ts + INTERVAL '1 hour')::text, 7) = $2`,
+          [cl.id, period]
+        );
+        if (discs.length === 0) continue;
+
+        const totalHT  = discs.reduce((s, d) => s + parseFloat(d.total || 0), 0);
+        const totalTTC = toTTC(totalHT, cl.vat_subject);
+        const id = `FAC-${period.replace('-', '')}-${cl.id}`;
+
+        if (cl.type === 'prepaid') {
+          await dbClient.query(
+            `INSERT INTO invoices(id, client_id, month, total_amount, paid_amount, status, paid_at, note)
+             VALUES ($1, $2, $3, $4, $4, 'paid', NOW(), '')
+             ON CONFLICT (id) DO UPDATE SET
+               total_amount = EXCLUDED.total_amount,
+               paid_amount  = GREATEST(invoices.paid_amount, EXCLUDED.total_amount)`,
+            [id, cl.id, period, totalTTC]
+          );
+        } else {
+          await dbClient.query(
+            `INSERT INTO invoices(id, client_id, month, total_amount, paid_amount, status)
+             VALUES ($1, $2, $3, $4, 0, 'pending')
+             ON CONFLICT (id) DO UPDATE SET
+               total_amount = EXCLUDED.total_amount,
+               status = CASE
+                 WHEN invoices.status = 'paid' THEN 'paid'
+                 WHEN invoices.paid_amount >= EXCLUDED.total_amount - 0.005 THEN 'paid'
+                 WHEN invoices.paid_amount > 0 THEN 'partial'
+                 ELSE invoices.status
+               END`,
+            [id, cl.id, period, totalTTC]
+          );
+        }
+        closedCount++;
+      }
+    }
+    console.log(`[closeCompletedMonths] checked ${clients.length} client(s), ${closedCount} invoice(s) up to date`);
+  } catch (e) {
+    console.error('[closeCompletedMonths] error:', e.message);
+  } finally {
+    dbClient.release();
+  }
+}
+
+// Manual trigger — same job the "🔄 Régénérer" button and the startup/interval
+// timer below call; exposed so admin can force a re-check on demand.
+app.post('/api/invoices/close-month', requireAdmin, async (req, res) => {
+  try {
+    await backfillInvoicePayments();
+    await closeCompletedMonths();
+    ok(res, { ok: true });
+  } catch (e) { er(res, e); }
+});
+
 app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
   const { email, password } = req.body;
   const ip = getIP(req);
@@ -1377,17 +1532,27 @@ app.post('/api/bills/:billId/payments', requireAdmin, async (req, res) => {
     `, [req.params.billId, bill.client_id]);
     if (syncRows.length > 0 && syncRows[0].earliest_ts) {
       const payFreq  = syncRows[0].pay_frequency || 'monthly';
-      const earliest = new Date(syncRows[0].earliest_ts);
+      // The frontend groups discharges into invoice periods using the BROWSER's local
+      // calendar date (Africa/Algiers, UTC+1, no DST) — see tsMatchesPfx in
+      // landfill-tracker.jsx. This server process runs in UTC, so a discharge made
+      // between 00:00-00:59 Algeria time (23:00-23:59 UTC the day before) would land
+      // in a different month here than on the frontend, right at a month boundary.
+      // Shift by the fixed +1h Algeria offset before reading year/month so this stays
+      // in sync with how the invoice was actually generated.
+      const ALGERIA_OFFSET_MS = 60 * 60 * 1000;
+      const earliest = new Date(new Date(syncRows[0].earliest_ts).getTime() + ALGERIA_OFFSET_MS);
       const period   = payFreq === 'annual'
         ? String(earliest.getUTCFullYear())
         : `${earliest.getUTCFullYear()}-${String(earliest.getUTCMonth()+1).padStart(2,'0')}`;
-      // Sum every cent allocated to discharges of this client+period
+      // Sum every cent allocated to discharges of this client+period.
+      // Same +1h Algeria shift as above, so a discharge just after local midnight is
+      // bucketed into the same month here as it was on the frontend.
       const { rows: paidRows } = await dbClient.query(`
         SELECT COALESCE(SUM(dp.applied_amount_ttc), 0) AS total_paid
         FROM discharge_payments dp
         JOIN discharges d ON d.id = dp.discharge_id
         WHERE d.client_id = $1
-          AND LEFT(d.ts::text, $2) = $3
+          AND LEFT((d.ts + INTERVAL '1 hour')::text, $2) = $3
       `, [bill.client_id, period.length, period]);
       const totalPaidTTC = parseFloat(paidRows[0].total_paid);
       // Find the matching invoice row; never downgrade a fully-paid invoice
@@ -1412,7 +1577,7 @@ app.post('/api/bills/:billId/payments', requireAdmin, async (req, res) => {
           await dbClient.query(
             `UPDATE discharges SET status='paid'
              WHERE client_id=$1 AND status NOT IN ('paid','cancelled')
-               AND LEFT(ts::text, $2) = $3`,
+               AND LEFT((ts + INTERVAL '1 hour')::text, $2) = $3`,
             [bill.client_id, period.length, period]
           );
         }
@@ -1507,5 +1672,13 @@ if (IS_PROD) {
 
 app.listen(PORT, () => {
   console.log(`API server running on port ${PORT}`);
-  runMigrations().catch(e => console.error('Migration failed:', e.message));
+  runMigrations()
+    .then(() => backfillInvoicePayments())
+    .then(() => closeCompletedMonths())
+    .catch(e => console.error('Startup sequence failed:', e.message));
+  setInterval(() => {
+    backfillInvoicePayments()
+      .then(() => closeCompletedMonths())
+      .catch(e => console.error('[closeCompletedMonths] periodic run failed:', e.message));
+  }, 6 * 60 * 60 * 1000); // every 6h — Render free tier can sleep past midnight, so don't rely on a single midnight cron
 });
